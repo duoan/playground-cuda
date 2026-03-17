@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="340" viewBox="0 0 760 340">
+<style>
+text { font-family: Arial, sans-serif; fill: #1f2933; }
+.title { font-size: 22px; font-weight: 700; }
+.label { font-size: 14px; }
+.value { font-size: 14px; font-weight: 700; }
+.axis { stroke: #94a3b8; stroke-width: 1; }
+</style>
+<rect width="760" height="340" fill="#ffffff" />
+<text x="180" y="28" class="title">Data Pipeline Experiments</text>
+<line x1="180" y1="280" x2="720" y2="280" class="axis" />
+<text x="168" y="87.3" text-anchor="end" class="label">Data bottleneck (workers=0)</text>
+<rect x="180" y="50.0" width="540.0" height="64.7" rx="6" fill="#e76f51" />
+<text x="728.0" y="87.3" class="value">622.4 ms</text>
+<text x="168" y="170.0" text-anchor="end" class="label">Data bottleneck fixed (workers=4)</text>
+<rect x="180" y="132.7" width="92.6" height="64.7" rx="6" fill="#e76f51" />
+<text x="280.6" y="170.0" class="value">106.7 ms</text>
+<text x="168" y="252.7" text-anchor="end" class="label">Data bottleneck fixed (workers=8)</text>
+<rect x="180" y="215.3" width="38.0" height="64.7" rx="6" fill="#e76f51" />
+<text x="226.0" y="252.7" class="value">43.8 ms</text>
+<line x1="180.0" y1="42" x2="180.0" y2="280" stroke="#e2e8f0" />
+<text x="180.0" y="304" text-anchor="middle" class="label">0</text>
+<line x1="315.0" y1="42" x2="315.0" y2="280" stroke="#e2e8f0" />
+<text x="315.0" y="304" text-anchor="middle" class="label">156</text>
+<line x1="450.0" y1="42" x2="450.0" y2="280" stroke="#e2e8f0" />
+<text x="450.0" y="304" text-anchor="middle" class="label">311</text>
+<line x1="585.0" y1="42" x2="585.0" y2="280" stroke="#e2e8f0" />
+<text x="585.0" y="304" text-anchor="middle" class="label">467</text>
+<line x1="720.0" y1="42" x2="720.0" y2="280" stroke="#e2e8f0" />
+<text x="720.0" y="304" text-anchor="middle" class="label">622</text>
+</svg>

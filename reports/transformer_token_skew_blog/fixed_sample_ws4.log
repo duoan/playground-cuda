@@ -1,0 +1,21 @@
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+App: transformer_token_skew_lab
+Strategy: sample
+Length mode: fixed
+World size: 4
+Per-rank sample batch size: 8
+Slowest steady-state rank: 1
+Slowest steady-state step time (ms): 16.32
+Global useful token throughput (tokens/s): 250959.41
+Global padded token throughput (tokens/s): 250959.41
+Average padding ratio: 0.000
+Average rank time skew (ms): 1.47
+Average rank token spread per step: 0.0
+
+rank=0 step_ms=16.31 data_ms=0.14 compute_ms=16.18 useful_tokens=1024.0 padded_tokens=1024.0 padding_ratio=0.000 samples=8.0
+rank=1 step_ms=16.32 data_ms=0.15 compute_ms=16.17 useful_tokens=1024.0 padded_tokens=1024.0 padding_ratio=0.000 samples=8.0
+rank=2 step_ms=16.25 data_ms=0.14 compute_ms=16.11 useful_tokens=1024.0 padded_tokens=1024.0 padding_ratio=0.000 samples=8.0
+rank=3 step_ms=16.24 data_ms=0.17 compute_ms=16.07 useful_tokens=1024.0 padded_tokens=1024.0 padding_ratio=0.000 samples=8.0

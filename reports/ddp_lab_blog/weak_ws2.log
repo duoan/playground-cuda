@@ -1,0 +1,14 @@
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+App: ddp_lab
+Mode: baseline
+World size: 2
+Per-rank batch size: 128
+Global batch size: 256
+Slowest steady-state rank: 1
+Slowest steady-state step time (ms): 42.64
+Global steady-state throughput (samples/s): 6004.03
+Average rank skew per step (ms): 1.18
+
+rank=0 step_ms=42.24 data_ms=0.66 compute_ms=41.58
+rank=1 step_ms=42.64 data_ms=0.63 compute_ms=42.01

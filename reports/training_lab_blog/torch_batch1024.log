@@ -1,0 +1,20 @@
+step=000 loss=6.9889 step_ms=291.65
+step=019 loss=7.1721 step_ms=5.90
+App: training_lab
+Mode: torch
+Device: cuda
+Batch size: 1024
+Input dim: 1024
+Hidden dim: 1024
+Num workers: 2
+Sleep per sample (ms): 0.0
+CPU transform depth: 1
+Micro ops: 48
+Pointwise depth: 0
+torch.compile: False
+AMP mode: none
+Average step time (ms): 23.59
+Steady-state step time (ms): 9.56
+Step time p50 (ms): 8.46
+Steady-state throughput (samples/s): 107119.52
+Final loss: 7.1721

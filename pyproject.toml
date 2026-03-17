@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "playground-cuda"
+version = "0.1.0"
+description = "Python helpers and examples for the playground-cuda repo."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.2.6",
+    "tensorboard>=2.20.0",
+    "tensorboardx>=2.6.4",
+    "torch>=2.10.0",
+]
+
+[tool.uv]
+package = true
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]

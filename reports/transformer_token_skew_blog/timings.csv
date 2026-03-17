@@ -1,0 +1,5 @@
+slug,title,strategy,length_mode,slowest_step_ms,global_useful_tokens_per_s,global_padded_tokens_per_s,average_padding_ratio,average_rank_time_skew_ms,average_rank_token_spread
+fixed_sample_ws4,Uniform lengths,sample,fixed,16.321364399482263,250959.41121993028,250959.41121993028,0.0,1.468968101835344,0
+variable_sample_ws4,Variable lengths + fixed batch,sample,variable,38.04817199779791,122005.8614187475,201702.20005429347,0.3951188366517251,0.4580426000757143,382
+variable_bucket_ws4,Variable lengths + bucketing,bucket,variable,24.05067079962464,208667.77653778894,210023.24808665353,0.006453911941716739,0.9269524016417563,51.7
+variable_token_ws4,Variable lengths + token budget,token,variable,25.032974599162117,193289.05483577467,194383.61113356744,0.005630908343608687,1.1647448991425335,83.3

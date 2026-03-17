@@ -1,0 +1,9 @@
+slug,title,category,mode,world_size,batch_size,global_batch_size,slowest_rank,slowest_step_ms,global_throughput_samples_per_s,average_rank_skew_ms
+weak_ws1,Weak scaling ws=1,weak,baseline,1,128,128,0,30.021127899817657,4263.6639245248825,0.0
+weak_ws2,Weak scaling ws=2,weak,baseline,2,128,256,1,42.63799479958834,6004.034692608753,1.1804908004705794
+weak_ws4,Weak scaling ws=4,weak,baseline,4,128,512,0,70.24137309999787,7289.151356296814,11.925304302712902
+strong_ws1,Strong scaling ws=1,strong,baseline,1,512,512,0,83.98703879938694,6096.1787356615005,0.0
+strong_ws2,Strong scaling ws=2,strong,baseline,2,256,512,1,61.959514399495674,8263.460502591794,1.9876362981449347
+skew_ws4,Straggler rank,pathology,skew,4,128,512,1,102.53940539987525,4993.202349899943,7.4530912992486265
+comm_ws4,Extra all-reduce,pathology,comm,4,128,512,1,271.4609857997857,1886.0905499607309,9.103172599134268
+barrier_ws4,Rank-0 work + barrier,pathology,barrier,4,128,512,2,89.16273469803855,5742.30929248588,8.644747200742131

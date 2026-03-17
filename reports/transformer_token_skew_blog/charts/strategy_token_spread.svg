@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="360" viewBox="0 0 860 360">
+<style>
+text { font-family: Arial, sans-serif; fill: #17212b; }
+.title { font-size: 22px; font-weight: 700; }
+.label { font-size: 14px; }
+.value { font-size: 14px; font-weight: 700; }
+</style>
+<rect width="860" height="360" fill="#ffffff" />
+<text x="240" y="32" class="title">Variable-Length Transformer: Average Rank Token Spread</text>
+<line x1="240.0" y1="50" x2="240.0" y2="296" stroke="#e2e8f0" />
+<text x="240.0" y="320" text-anchor="middle" class="label">0</text>
+<line x1="380.0" y1="50" x2="380.0" y2="296" stroke="#e2e8f0" />
+<text x="380.0" y="320" text-anchor="middle" class="label">96</text>
+<line x1="520.0" y1="50" x2="520.0" y2="296" stroke="#e2e8f0" />
+<text x="520.0" y="320" text-anchor="middle" class="label">191</text>
+<line x1="660.0" y1="50" x2="660.0" y2="296" stroke="#e2e8f0" />
+<text x="660.0" y="320" text-anchor="middle" class="label">286</text>
+<line x1="800.0" y1="50" x2="800.0" y2="296" stroke="#e2e8f0" />
+<text x="800.0" y="320" text-anchor="middle" class="label">382</text>
+<text x="230" y="84.0" text-anchor="end" class="label">Uniform lengths</text>
+<rect x="240" y="56.0" width="0.0" height="48.0" rx="6" fill="#7c3aed" />
+<text x="248.0" y="84.0" class="value">0 tokens</text>
+<text x="230" y="148.0" text-anchor="end" class="label">Variable lengths + fixed batch</text>
+<rect x="240" y="120.0" width="560.0" height="48.0" rx="6" fill="#7c3aed" />
+<text x="808.0" y="148.0" class="value">382 tokens</text>
+<text x="230" y="212.0" text-anchor="end" class="label">Variable lengths + bucketing</text>
+<rect x="240" y="184.0" width="75.8" height="48.0" rx="6" fill="#7c3aed" />
+<text x="323.8" y="212.0" class="value">52 tokens</text>
+<text x="230" y="276.0" text-anchor="end" class="label">Variable lengths + token budget</text>
+<rect x="240" y="248.0" width="122.1" height="48.0" rx="6" fill="#7c3aed" />
+<text x="370.1" y="276.0" class="value">83 tokens</text>
+</svg>

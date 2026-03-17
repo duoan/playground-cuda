@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="460" viewBox="0 0 980 460">
+<style>
+text { font-family: Arial, sans-serif; fill: #17212b; }
+.title { font-size: 22px; font-weight: 700; }
+.label { font-size: 13px; }
+.legend { font-size: 13px; font-weight: 700; }
+.value { font-size: 13px; font-weight: 700; }
+</style>
+<rect width="980" height="460" fill="#ffffff" />
+<text x="170" y="34" class="title">Per-Rank Useful Tokens vs Padding Waste</text>
+<line x1="170.0" y1="56" x2="170.0" y2="388" stroke="#e2e8f0" />
+<text x="170.0" y="412" text-anchor="middle" class="label">0</text>
+<line x1="360.0" y1="56" x2="360.0" y2="388" stroke="#e2e8f0" />
+<text x="360.0" y="412" text-anchor="middle" class="label">488</text>
+<line x1="550.0" y1="56" x2="550.0" y2="388" stroke="#e2e8f0" />
+<text x="550.0" y="412" text-anchor="middle" class="label">976</text>
+<line x1="740.0" y1="56" x2="740.0" y2="388" stroke="#e2e8f0" />
+<text x="740.0" y="412" text-anchor="middle" class="label">1465</text>
+<line x1="930.0" y1="56" x2="930.0" y2="388" stroke="#e2e8f0" />
+<text x="930.0" y="412" text-anchor="middle" class="label">1953</text>
+<text x="160" y="80.2" text-anchor="end" class="label">sample r0</text>
+<rect x="170" y="62.0" width="445.1" height="28.5" rx="5" fill="#0f766e" />
+<rect x="615.1" y="62.0" width="314.9" height="28.5" rx="5" fill="#f97316" />
+<text x="938.0" y="80.2" class="value">1953</text>
+<text x="160" y="122.8" text-anchor="end" class="label">sample r1</text>
+<rect x="170" y="104.5" width="459.2" height="28.5" rx="5" fill="#0f766e" />
+<rect x="629.2" y="104.5" width="269.9" height="28.5" rx="5" fill="#f97316" />
+<text x="907.2" y="122.8" class="value">1874</text>
+<text x="160" y="165.2" text-anchor="end" class="label">sample r2</text>
+<rect x="170" y="147.0" width="434.2" height="28.5" rx="5" fill="#0f766e" />
+<rect x="604.2" y="147.0" width="317.1" height="28.5" rx="5" fill="#f97316" />
+<text x="929.3" y="165.2" class="value">1930</text>
+<text x="160" y="207.8" text-anchor="end" class="label">sample r3</text>
+<rect x="170" y="189.5" width="468.1" height="28.5" rx="5" fill="#0f766e" />
+<rect x="638.1" y="189.5" width="278.2" height="28.5" rx="5" fill="#f97316" />
+<text x="924.3" y="207.8" class="value">1918</text>
+<text x="160" y="250.2" text-anchor="end" class="label">token r0</text>
+<rect x="170" y="232.0" width="474.2" height="28.5" rx="5" fill="#0f766e" />
+<rect x="644.2" y="232.0" width="2.7" height="28.5" rx="5" fill="#f97316" />
+<text x="654.9" y="250.2" class="value">1225</text>
+<text x="160" y="292.8" text-anchor="end" class="label">token r1</text>
+<rect x="170" y="274.5" width="473.2" height="28.5" rx="5" fill="#0f766e" />
+<rect x="643.2" y="274.5" width="2.6" height="28.5" rx="5" fill="#f97316" />
+<text x="653.7" y="292.8" class="value">1222</text>
+<text x="160" y="335.2" text-anchor="end" class="label">token r2</text>
+<rect x="170" y="317.0" width="462.2" height="28.5" rx="5" fill="#0f766e" />
+<rect x="632.2" y="317.0" width="2.9" height="28.5" rx="5" fill="#f97316" />
+<text x="643.1" y="335.2" class="value">1195</text>
+<text x="160" y="377.8" text-anchor="end" class="label">token r3</text>
+<rect x="170" y="359.5" width="473.5" height="28.5" rx="5" fill="#0f766e" />
+<rect x="643.5" y="359.5" width="2.5" height="28.5" rx="5" fill="#f97316" />
+<text x="654.1" y="377.8" class="value">1223</text>
+<rect x="170" y="422" width="16" height="16" rx="3" fill="#0f766e" />
+<text x="192" y="434" class="legend">useful tokens</text>
+<rect x="316" y="422" width="16" height="16" rx="3" fill="#f97316" />
+<text x="338" y="434" class="legend">padding waste</text>
+<text x="490.0" y="452" text-anchor="middle" class="label">tokens per steady-state step</text>
+</svg>

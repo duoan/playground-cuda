@@ -1,0 +1,14 @@
+build/
+libtorch/
+.vscode/.browse.VC.db*
+.vscode/ipch/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+*.nsys-rep
+*.sqlite
+*.ncu-rep
+*.egg-info
+traces/

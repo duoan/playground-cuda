@@ -1,0 +1,63 @@
+step=000 loss=7.0117 step_ms=432.63
+step=007 loss=7.7943 step_ms=12.18
+App: training_lab
+Mode: torch
+Device: cuda
+Batch size: 256
+Input dim: 1024
+Hidden dim: 1024
+Num workers: 2
+Sleep per sample (ms): 0.0
+CPU transform depth: 1
+Micro ops: 48
+Pointwise depth: 0
+torch.compile: False
+AMP mode: none
+Average step time (ms): 65.54
+Steady-state step time (ms): 13.10
+Step time p50 (ms): 12.05
+Steady-state throughput (samples/s): 19546.50
+Final loss: 7.7943
+
+Top operators by self CPU time:
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                               backward        32.88%      35.191ms        33.18%      35.522ms       5.920ms       0.000us         0.00%       5.033us       0.839us      -4.50 KB      -4.50 KB    -540.00 MB    -542.01 MB             6  
+                                       cudaLaunchKernel        20.59%      22.039ms        20.59%      22.039ms       6.752us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          3264  
+                                                forward         7.88%       8.438ms        33.80%      36.184ms       6.031ms       0.000us         0.00%       3.246ms     541.009us       4.50 KB       4.51 KB     587.86 MB      -1.13 GB             6  
+                                              aten::mul         6.31%       6.752ms        13.37%      14.313ms      12.424us       1.459ms        17.56%       1.459ms       1.267us           0 B           0 B       1.12 GB       1.12 GB          1152  
+                                              aten::add         4.09%       4.376ms         7.74%       8.283ms      14.380us     823.131us         9.90%     823.131us       1.429us          -8 B          -8 B     576.00 MB     576.00 MB           576  
+      autograd::engine::evaluate_function: MulBackward0         1.93%       2.070ms         8.14%       8.716ms      15.133us       0.000us         0.00%     728.340us       1.264us      -4.50 KB      -4.50 KB     288.00 MB    -288.00 MB           576  
+                                          aten::sigmoid         1.74%       1.863ms         3.47%       3.710ms      12.881us     481.009us         5.79%     481.009us       1.670us           0 B           0 B     288.00 MB     288.00 MB           288  
+                                  cudaDeviceSynchronize         1.49%       1.590ms         1.49%       1.590ms     122.303us       1.303us         0.02%       1.303us       0.100us           0 B           0 B           0 B           0 B            13  
+autograd::engine::evaluate_function: SigmoidBackward...         1.48%       1.585ms         7.42%       7.942ms      27.575us       0.000us         0.00%       1.111ms       3.858us           0 B           0 B    -576.00 MB    -864.00 MB           288  
+                                          ProfilerStep*         1.44%       1.544ms        74.95%      80.227ms      13.371ms       0.000us         0.00%       5.253ms     875.574us           0 B           0 B           0 B           0 B             6  
+                               aten::threshold_backward         1.27%       1.364ms         3.09%       3.307ms      11.482us     679.469us         8.18%     679.469us       2.359us           0 B           0 B     288.00 MB     288.00 MB           288  
+                                        aten::clamp_min         1.24%       1.326ms         3.14%       3.365ms      11.685us     377.195us         4.54%     377.195us       1.310us           0 B           0 B     288.00 MB     288.00 MB           288  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 107.043ms
+Self CUDA time total: 8.311ms
+
+
+Top operators by CUDA time:
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                forward         0.00%       0.000us         0.00%       0.000us       0.000us      33.661ms       405.00%      33.661ms       5.610ms           0 B           0 B           0 B           0 B             6  
+                                          ProfilerStep*         1.44%       1.544ms        74.95%      80.227ms      13.371ms       0.000us         0.00%       5.253ms     875.574us           0 B           0 B           0 B           0 B             6  
+                                                forward         7.88%       8.438ms        33.80%      36.184ms       6.031ms       0.000us         0.00%       3.246ms     541.009us       4.50 KB       4.51 KB     587.86 MB      -1.13 GB             6  
+                              Optimizer.step#AdamW.step         0.00%       0.000us         0.00%       0.000us       0.000us       2.030ms        24.42%       2.030ms     338.320us           0 B           0 B           0 B           0 B             6  
+                                              optimizer         0.33%     348.794us         2.00%       2.140ms     356.660us       0.000us         0.00%       1.626ms     271.000us           0 B           0 B           0 B           0 B             6  
+                              Optimizer.step#AdamW.step         1.14%       1.225ms         1.67%       1.791ms     298.528us       0.000us         0.00%       1.626ms     271.000us           0 B           0 B           0 B           0 B             6  
+                                    aten::_fused_adamw_         0.08%      89.806us         0.17%     179.172us      29.862us       1.619ms        19.47%       1.619ms     269.762us           0 B           0 B           0 B           0 B             6  
+void at::native::(anonymous namespace)::multi_tensor...         0.00%       0.000us         0.00%       0.000us       0.000us       1.619ms        19.47%       1.619ms     269.762us           0 B           0 B           0 B           0 B             6  
+                                              aten::mul         6.31%       6.752ms        13.37%      14.313ms      12.424us       1.459ms        17.56%       1.459ms       1.267us           0 B           0 B       1.12 GB       1.12 GB          1152  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.459ms        17.56%       1.459ms       1.267us           0 B           0 B           0 B           0 B          1152  
+autograd::engine::evaluate_function: SigmoidBackward...         1.48%       1.585ms         7.42%       7.942ms      27.575us       0.000us         0.00%       1.111ms       3.858us           0 B           0 B    -576.00 MB    -864.00 MB           288  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us     898.994us        10.82%     898.994us       1.561us           0 B           0 B           0 B           0 B           576  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 107.043ms
+Self CUDA time total: 8.311ms
+
+Torch profiler trace written to: /home/duoan/playground-cuda/traces/blog_torch_profile

@@ -1,0 +1,24 @@
+{
+  "files.associations": {
+    "*.cu": "cuda-cpp",
+    "*.cuh": "cuda-cpp"
+  },
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/python"
+  ],
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "cmake.configureOnOpen": true,
+  "cmake.configureSettings": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "CMAKE_CUDA_ARCHITECTURES": "native",
+    "DOWNLOAD_LIBTORCH": "OFF",
+    "TORCH_ROOT": "${workspaceFolder}/libtorch"
+  },
+  "cmake.sourceDirectory": "${workspaceFolder}",
+  "terminal.integrated.env.linux": {
+    "LD_LIBRARY_PATH": "${workspaceFolder}/libtorch/lib:${env:LD_LIBRARY_PATH}",
+    "PYTHONPATH": "${workspaceFolder}/python"
+  }
+}

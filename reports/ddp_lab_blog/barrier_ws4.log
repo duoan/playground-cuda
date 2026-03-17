@@ -1,0 +1,18 @@
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank [Gloo] Rank 2 is connected to 31 peer ranks. Expected number of connected peer ranks is :  is connected to 33 peer ranks. Expected number of connected peer ranks is : 
+3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+App: ddp_lab
+Mode: barrier
+World size: 4
+Per-rank batch size: 128
+Global batch size: 512
+Slowest steady-state rank: 2
+Slowest steady-state step time (ms): 89.16
+Global steady-state throughput (samples/s): 5742.31
+Average rank skew per step (ms): 8.64
+
+rank=0 step_ms=87.52 data_ms=0.73 compute_ms=86.78
+rank=1 step_ms=87.60 data_ms=0.70 compute_ms=86.90
+rank=2 step_ms=89.16 data_ms=0.79 compute_ms=88.37
+rank=3 step_ms=87.62 data_ms=0.82 compute_ms=86.80
