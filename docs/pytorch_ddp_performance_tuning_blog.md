@@ -60,6 +60,8 @@ The code lives here:
 - lab workload: [ddp_lab.py](../python/playground_cuda/ddp_lab.py)
 - experiment runner: [ddp_lab_blog_experiments.py](../python/playground_cuda/ddp_lab_blog_experiments.py)
 
+The full repo is published at [duoan/playground-cuda](https://github.com/duoan/playground-cuda).
+
 The generated artifacts for this article are checked in:
 
 - timing table: [timings.csv](../reports/ddp_lab_blog/timings.csv)

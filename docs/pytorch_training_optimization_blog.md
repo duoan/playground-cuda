@@ -51,7 +51,7 @@ All numbers in this post were collected on the local machine backing this repo:
 - PyTorch: `torch 2.10.0+cu128`
 - OS: WSL2 kernel `6.6.87.2-microsoft-standard-WSL2`
 
-The training lab code lives in [training_lab.py](../python/playground_cuda/training_lab.py). The experiment runner that generated the charts and CSVs lives in [training_lab_blog_experiments.py](../python/playground_cuda/training_lab_blog_experiments.py).
+The training lab code lives in [training_lab.py](../python/playground_cuda/training_lab.py). The experiment runner that generated the charts and CSVs lives in [training_lab_blog_experiments.py](../python/playground_cuda/training_lab_blog_experiments.py). The full repo is published at [duoan/playground-cuda](https://github.com/duoan/playground-cuda).
 
 The raw artifacts for this article are checked in:
 

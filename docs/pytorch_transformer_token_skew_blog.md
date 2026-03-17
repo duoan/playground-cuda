@@ -50,6 +50,8 @@ I used a small synthetic lab in this repo:
 - experiment workload: [transformer_token_skew_lab.py](../python/playground_cuda/transformer_token_skew_lab.py)
 - experiment runner: [transformer_token_skew_blog_experiments.py](../python/playground_cuda/transformer_token_skew_blog_experiments.py)
 
+The full repo is published at [duoan/playground-cuda](https://github.com/duoan/playground-cuda).
+
 The lab uses:
 
 - `world_size = 4`
