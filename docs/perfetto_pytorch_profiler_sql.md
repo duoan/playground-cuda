@@ -20,20 +20,20 @@ Perfetto is a trace viewer, not a PyTorch-specific summary UI. The way to get si
 
 This repo now keeps the queries in a reusable SQL pack:
 
-- [perfetto/sql/01_top_cpu_total.sql](/home/duoan/playground-cuda/perfetto/sql/01_top_cpu_total.sql)
-- [perfetto/sql/02_top_self_cpu.sql](/home/duoan/playground-cuda/perfetto/sql/02_top_self_cpu.sql)
-- [perfetto/sql/03_top_cuda_total.sql](/home/duoan/playground-cuda/perfetto/sql/03_top_cuda_total.sql)
-- [perfetto/sql/04_top_cpu_calls.sql](/home/duoan/playground-cuda/perfetto/sql/04_top_cpu_calls.sql)
-- [perfetto/sql/05_launch_overhead.sql](/home/duoan/playground-cuda/perfetto/sql/05_launch_overhead.sql)
-- [perfetto/sql/06_top_gpu_kernels.sql](/home/duoan/playground-cuda/perfetto/sql/06_top_gpu_kernels.sql)
-- [perfetto/sql/07_memcpy_summary.sql](/home/duoan/playground-cuda/perfetto/sql/07_memcpy_summary.sql)
-- [perfetto/sql/08_busy_tracks.sql](/home/duoan/playground-cuda/perfetto/sql/08_busy_tracks.sql)
-- [perfetto/sql/09_step_local_cpu_summary.sql](/home/duoan/playground-cuda/perfetto/sql/09_step_local_cpu_summary.sql)
-- [perfetto/sql/10_user_annotations.sql](/home/duoan/playground-cuda/perfetto/sql/10_user_annotations.sql)
+- [perfetto/sql/01_top_cpu_total.sql](../perfetto/sql/01_top_cpu_total.sql)
+- [perfetto/sql/02_top_self_cpu.sql](../perfetto/sql/02_top_self_cpu.sql)
+- [perfetto/sql/03_top_cuda_total.sql](../perfetto/sql/03_top_cuda_total.sql)
+- [perfetto/sql/04_top_cpu_calls.sql](../perfetto/sql/04_top_cpu_calls.sql)
+- [perfetto/sql/05_launch_overhead.sql](../perfetto/sql/05_launch_overhead.sql)
+- [perfetto/sql/06_top_gpu_kernels.sql](../perfetto/sql/06_top_gpu_kernels.sql)
+- [perfetto/sql/07_memcpy_summary.sql](../perfetto/sql/07_memcpy_summary.sql)
+- [perfetto/sql/08_busy_tracks.sql](../perfetto/sql/08_busy_tracks.sql)
+- [perfetto/sql/09_step_local_cpu_summary.sql](../perfetto/sql/09_step_local_cpu_summary.sql)
+- [perfetto/sql/10_user_annotations.sql](../perfetto/sql/10_user_annotations.sql)
 
 There is also a follow-up implementation plan for turning this into a real Perfetto-side experience:
 
-- [perfetto_pytorch_extension_plan.md](/home/duoan/playground-cuda/docs/perfetto_pytorch_extension_plan.md)
+- [perfetto_pytorch_extension_plan.md](./perfetto_pytorch_extension_plan.md)
 
 ## Important Caveat
 
@@ -81,7 +81,7 @@ Then I zoom back into the timeline to answer:
 
 File:
 
-- [01_top_cpu_total.sql](/home/duoan/playground-cuda/perfetto/sql/01_top_cpu_total.sql)
+- [01_top_cpu_total.sql](../perfetto/sql/01_top_cpu_total.sql)
 
 Use this when you want something close to:
 
@@ -93,7 +93,7 @@ prof.key_averages().table(sort_by="cpu_time_total")
 
 File:
 
-- [02_top_self_cpu.sql](/home/duoan/playground-cuda/perfetto/sql/02_top_self_cpu.sql)
+- [02_top_self_cpu.sql](../perfetto/sql/02_top_self_cpu.sql)
 
 Use this when you want something close to:
 
@@ -105,7 +105,7 @@ prof.key_averages().table(sort_by="self_cpu_time_total")
 
 File:
 
-- [03_top_cuda_total.sql](/home/duoan/playground-cuda/perfetto/sql/03_top_cuda_total.sql)
+- [03_top_cuda_total.sql](../perfetto/sql/03_top_cuda_total.sql)
 
 Use this when you want something close to:
 
@@ -117,7 +117,7 @@ prof.key_averages().table(sort_by="cuda_time_total")
 
 File:
 
-- [04_top_cpu_calls.sql](/home/duoan/playground-cuda/perfetto/sql/04_top_cpu_calls.sql)
+- [04_top_cpu_calls.sql](../perfetto/sql/04_top_cpu_calls.sql)
 
 This is great for spotting eager and tiny-op problems.
 
@@ -125,7 +125,7 @@ This is great for spotting eager and tiny-op problems.
 
 File:
 
-- [05_launch_overhead.sql](/home/duoan/playground-cuda/perfetto/sql/05_launch_overhead.sql)
+- [05_launch_overhead.sql](../perfetto/sql/05_launch_overhead.sql)
 
 If this is large and your kernels are tiny, you are probably paying too much launch overhead.
 
@@ -133,7 +133,7 @@ If this is large and your kernels are tiny, you are probably paying too much lau
 
 File:
 
-- [06_top_gpu_kernels.sql](/home/duoan/playground-cuda/perfetto/sql/06_top_gpu_kernels.sql)
+- [06_top_gpu_kernels.sql](../perfetto/sql/06_top_gpu_kernels.sql)
 
 Use this before going deeper with `ncu`.
 
@@ -141,7 +141,7 @@ Use this before going deeper with `ncu`.
 
 File:
 
-- [07_memcpy_summary.sql](/home/duoan/playground-cuda/perfetto/sql/07_memcpy_summary.sql)
+- [07_memcpy_summary.sql](../perfetto/sql/07_memcpy_summary.sql)
 
 Useful when you suspect copies are part of the problem.
 
@@ -149,7 +149,7 @@ Useful when you suspect copies are part of the problem.
 
 File:
 
-- [08_busy_tracks.sql](/home/duoan/playground-cuda/perfetto/sql/08_busy_tracks.sql)
+- [08_busy_tracks.sql](../perfetto/sql/08_busy_tracks.sql)
 
 Useful for:
 
@@ -161,7 +161,7 @@ Useful for:
 
 File:
 
-- [09_step_local_cpu_summary.sql](/home/duoan/playground-cuda/perfetto/sql/09_step_local_cpu_summary.sql)
+- [09_step_local_cpu_summary.sql](../perfetto/sql/09_step_local_cpu_summary.sql)
 
 This is great for comparing:
 
@@ -175,7 +175,7 @@ You need to edit the `step_window` CTE with the `ts` and `dur` for the step you 
 
 File:
 
-- [10_user_annotations.sql](/home/duoan/playground-cuda/perfetto/sql/10_user_annotations.sql)
+- [10_user_annotations.sql](../perfetto/sql/10_user_annotations.sql)
 
 This is often the fastest top-down query in the whole trace if you used `record_function()`.
 

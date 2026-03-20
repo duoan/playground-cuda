@@ -18,7 +18,7 @@ What it gives us:
 
 This is what lives in:
 
-- [perfetto/sql](/home/duoan/playground-cuda/perfetto/sql)
+- [perfetto/sql](../perfetto/sql)
 
 ## 2. Custom Perfetto UI Plugin
 
@@ -85,16 +85,16 @@ Nice-to-have later:
 
 Keep the actual SQL in repo-owned files:
 
-- [perfetto/sql/01_top_cpu_total.sql](/home/duoan/playground-cuda/perfetto/sql/01_top_cpu_total.sql)
-- [perfetto/sql/02_top_self_cpu.sql](/home/duoan/playground-cuda/perfetto/sql/02_top_self_cpu.sql)
-- [perfetto/sql/03_top_cuda_total.sql](/home/duoan/playground-cuda/perfetto/sql/03_top_cuda_total.sql)
-- [perfetto/sql/04_top_cpu_calls.sql](/home/duoan/playground-cuda/perfetto/sql/04_top_cpu_calls.sql)
-- [perfetto/sql/05_launch_overhead.sql](/home/duoan/playground-cuda/perfetto/sql/05_launch_overhead.sql)
-- [perfetto/sql/06_top_gpu_kernels.sql](/home/duoan/playground-cuda/perfetto/sql/06_top_gpu_kernels.sql)
-- [perfetto/sql/07_memcpy_summary.sql](/home/duoan/playground-cuda/perfetto/sql/07_memcpy_summary.sql)
-- [perfetto/sql/08_busy_tracks.sql](/home/duoan/playground-cuda/perfetto/sql/08_busy_tracks.sql)
-- [perfetto/sql/09_step_local_cpu_summary.sql](/home/duoan/playground-cuda/perfetto/sql/09_step_local_cpu_summary.sql)
-- [perfetto/sql/10_user_annotations.sql](/home/duoan/playground-cuda/perfetto/sql/10_user_annotations.sql)
+- [perfetto/sql/01_top_cpu_total.sql](../perfetto/sql/01_top_cpu_total.sql)
+- [perfetto/sql/02_top_self_cpu.sql](../perfetto/sql/02_top_self_cpu.sql)
+- [perfetto/sql/03_top_cuda_total.sql](../perfetto/sql/03_top_cuda_total.sql)
+- [perfetto/sql/04_top_cpu_calls.sql](../perfetto/sql/04_top_cpu_calls.sql)
+- [perfetto/sql/05_launch_overhead.sql](../perfetto/sql/05_launch_overhead.sql)
+- [perfetto/sql/06_top_gpu_kernels.sql](../perfetto/sql/06_top_gpu_kernels.sql)
+- [perfetto/sql/07_memcpy_summary.sql](../perfetto/sql/07_memcpy_summary.sql)
+- [perfetto/sql/08_busy_tracks.sql](../perfetto/sql/08_busy_tracks.sql)
+- [perfetto/sql/09_step_local_cpu_summary.sql](../perfetto/sql/09_step_local_cpu_summary.sql)
+- [perfetto/sql/10_user_annotations.sql](../perfetto/sql/10_user_annotations.sql)
 
 This keeps query logic independent from any eventual UI implementation.
 
@@ -177,8 +177,8 @@ For now, this repo should only own:
 
 Deliverables:
 
-- [perfetto_pytorch_profiler_sql.md](/home/duoan/playground-cuda/docs/perfetto_pytorch_profiler_sql.md)
-- [perfetto/sql](/home/duoan/playground-cuda/perfetto/sql)
+- [perfetto_pytorch_profiler_sql.md](./perfetto_pytorch_profiler_sql.md)
+- [perfetto/sql](../perfetto/sql)
 - this design doc
 
 ## Phase 2: Self-Hosted Query Dashboard
