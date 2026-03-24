@@ -1,4 +1,5 @@
 build/
+src/build/
 libtorch/
 .vscode/.browse.VC.db*
 .vscode/ipch/

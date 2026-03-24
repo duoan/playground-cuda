@@ -1,93 +1,24 @@
 {
-    "version": "0.2.0",
-    "configurations": [
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "cwd": "/home/duoan/Projects/playground-cuda/src/cuda",
+      "program": "/home/duoan/Projects/playground-cuda/src/cuda/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
         {
-            "name": "Run Active CUDA File",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/${fileBasenameNoExtension}",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [
-                {
-                    "name": "LD_LIBRARY_PATH",
-                    "value": "${workspaceFolder}/libtorch/lib:${env:LD_LIBRARY_PATH}"
-                },
-                {
-                    "name": "LD_PRELOAD",
-                    "value": "${workspaceFolder}/libtorch/lib/libtorch_cuda.so"
-                }
-            ],
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "externalConsole": false,
-            "internalConsoleOptions": "neverOpen",
-            "preLaunchTask": "build active cu"
-        },
-        {
-            "name": "Debug Active CUDA File",
-            "type": "cuda-gdb",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/${fileBasenameNoExtension}",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [
-                {
-                    "name": "LD_LIBRARY_PATH",
-                    "value": "${workspaceFolder}/libtorch/lib:${env:LD_LIBRARY_PATH}"
-                },
-                {
-                    "name": "LD_PRELOAD",
-                    "value": "${workspaceFolder}/libtorch/lib/libtorch_cuda.so"
-                }
-            ],
-            "debuggerPath": "/usr/local/cuda/bin/cuda-gdb",
-            "breakOnLaunch": true,
-            "onAPIError": "stop",
-            "initCommands": [
-                "set cuda break_on_launch application"
-            ],
-            "preLaunchTask": "build active cu"
-        },
-        {
-            "name": "Attach CUDA Process",
-            "type": "cuda-gdb",
-            "request": "attach",
-            "processId": "${command:cuda.pickProcess}",
-            "debuggerPath": "/usr/local/cuda/bin/cuda-gdb",
-            "breakOnLaunch": true,
-            "onAPIError": "stop",
-            "initCommands": [
-                "set cuda break_on_launch application"
-            ]
-        },
-        {
-            "name": "Run Active Python File",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/.venv/bin/python",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/python"
-            },
-            "preLaunchTask": "sync python env"
-        },
-        {
-            "name": "Debug Python Module: device_query",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "playground_cuda.device_query",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/.venv/bin/python",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/python"
-            },
-            "preLaunchTask": "sync python env"
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
         }
-    ]
+      ]
+    }
+  ]
 }

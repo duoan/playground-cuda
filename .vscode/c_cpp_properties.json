@@ -2,29 +2,21 @@
   "version": 4,
   "configurations": [
     {
-      "name": "Linux",
-      "compilerPath": "/usr/bin/g++",
+      "name": "linux-gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
       "intelliSenseMode": "linux-gcc-x64",
-      "cStandard": "c17",
-      "cppStandard": "c++17",
-      "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+      "cStandard": "${default}",
+      "cppStandard": "${default}",
       "includePath": [
-        "${workspaceFolder}/src",
-        "${workspaceFolder}/examples",
-        "/usr/local/cuda/include",
-        "${workspaceFolder}/libtorch/include",
-        "${workspaceFolder}/libtorch/include/torch/csrc/api/include"
-      ],
-      "defines": [
-        "_GLIBCXX_USE_CXX11_ABI=1"
+        "${workspaceFolder}/src/cuda",
+        "${workspaceFolder}/src/cuda/common",
+        "/usr/local/cuda/include"
       ],
       "browse": {
         "path": [
-          "${workspaceFolder}/src",
-          "${workspaceFolder}/examples",
-          "/usr/local/cuda/include",
-          "${workspaceFolder}/libtorch/include",
-          "${workspaceFolder}/libtorch/include/torch/csrc/api/include"
+          "${workspaceFolder}/src/cuda",
+          "${workspaceFolder}/src/cuda/common",
+          "/usr/local/cuda/include"
         ],
         "limitSymbolsToIncludedHeaders": true
       }
