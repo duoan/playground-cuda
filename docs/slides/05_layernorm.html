@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>05 LayerNorm</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">05 LayerNorm</div>
+      <h1>Row Statistics Plus Affine Transform</h1>
+      <p>LayerNorm is a perfect lesson in reduction-based deep-learning kernels: compute mean, compute variance, normalize, then apply gamma and beta.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/05_layernorm.cu</span></div>
+    </section>
+    <section class="slide">
+      <h2>Visual Model + Code</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">row x</div>
+          <div class="arrow">→</div>
+          <div class="node">mean</div>
+          <div class="arrow">→</div>
+          <div class="node">variance</div>
+          <div class="arrow">→</div>
+          <div class="node">normalize</div>
+          <div class="arrow">→</div>
+          <div class="node">gamma/beta</div>
+        </div>
+      </div>
+      <pre class="snippet"><code>float mean = shared_sum[0] / cols;
+float inv_std = 1.0f / sqrtf(shared_var[0] / cols + eps);
+
+for (int col = threadIdx.x; col &lt; cols; col += blockDim.x) {
+  float normalized = (row_ptr[col] - mean) * inv_std;
+  out_ptr[col] = normalized * gamma[col] + beta[col];
+}</code></pre>
+      <div class="caption">LayerNorm is “two reductions plus affine transform,” all done row by row.</div>
+    </section>
+    <section class="slide">
+      <h2>Optimization Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Current</h3><p><span class="mono">CPU -> naive -> block/shared-memory -> warp-aware / fused</span></p></div>
+        <div class="card"><h3>Next</h3><p><span class="mono">RMSNorm sibling and stronger row-wise fusion</span></p></div>
+      </div>
+    </section>
+    <section class="slide">
+      <h2>Kernel Skeleton</h2>
+      <ul>
+        <li>Reduction 1: row mean</li>
+        <li>Reduction 2: row variance</li>
+        <li>Elementwise step: normalize and apply gamma/beta</li>
+      </ul>
+      <div class="callout">If softmax was “two reductions plus normalize,” layernorm is “two reductions plus affine normalize.”</div>
+    </section>
+    <section class="slide">
+      <h2>Why It Matters</h2>
+      <p>Transformers use normalization constantly. If you understand row-wise layernorm well, later fused kernels will feel much less magical.</p>
+    </section>
+    <section class="slide">
+      <h2>Practice Prompt</h2>
+      <p>Open <span class="mono">src/cuda/practice/05_layernorm_practice.cu</span> and implement the row kernel. Keep the math readable before trying to make it fast.</p>
+      <div class="footer"><span>LayerNorm is reduction plus structure</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

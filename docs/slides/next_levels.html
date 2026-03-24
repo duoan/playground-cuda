@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Next-Level Plans</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">Roadmap</div>
+      <h1>Next-Level Plans</h1>
+      <p>This deck turns each kernel's “next target” into a concrete follow-up plan, so tomorrow's reading can naturally turn into the next round of implementation.</p>
+    </section>
+    <section class="slide">
+      <h2>01 Vector Add</h2>
+      <ul>
+        <li>Add a <span class="mono">grid-stride</span> version.</li>
+        <li>Add a <span class="mono">float2 / float4</span> vectorized version.</li>
+        <li>Compare one-thread-one-element vs one-thread-many-elements.</li>
+      </ul>
+    </section>
+    <section class="slide">
+      <h2>02 Reduce Sum</h2>
+      <ul>
+        <li>Add <span class="mono">multi-elements-per-thread</span>.</li>
+        <li>Add a more explicit multi-stage reduction walkthrough.</li>
+        <li>Connect reduction cost to bandwidth and synchronization.</li>
+      </ul>
+    </section>
+    <section class="slide">
+      <h2>03 Softmax + 04 Matmul</h2>
+      <div class="grid two">
+        <div class="card">
+          <h3>03 Softmax</h3>
+          <p>Add online, masked, and causal softmax.</p>
+          <p>Make the bridge into attention and FlashAttention explicit.</p>
+        </div>
+        <div class="card">
+          <h3>04 Matmul</h3>
+          <p>Add a tensor-core / pipeline-oriented teaching version.</p>
+          <p>Explain staging, double buffering, and MMA-friendly tiles.</p>
+        </div>
+      </div>
+    </section>
+    <section class="slide">
+      <h2>05 LayerNorm + 06 MLP</h2>
+      <div class="grid two">
+        <div class="card">
+          <h3>05 LayerNorm</h3>
+          <p>Add warp-aware and more fused row-wise normalization.</p>
+          <p>Then add RMSNorm as a close relative.</p>
+        </div>
+        <div class="card">
+          <h3>06 MLP</h3>
+          <p>Add tiled GEMM-style MLP and stronger epilogue fusion.</p>
+          <p>Move toward real DL-block execution structure.</p>
+        </div>
+      </div>
+    </section>
+    <section class="slide">
+      <h2>07 Attention + 08/09/10 FlashAttention</h2>
+      <ul>
+        <li><strong>07 Attention:</strong> stronger tiled attention, optional causal path.</li>
+        <li><strong>08 FA v1:</strong> clearer online softmax and SRAM reuse story.</li>
+        <li><strong>09 FA v2:</strong> better warp specialization and work partition.</li>
+        <li><strong>10 FA v3:</strong> pipeline-oriented and tensor-core-era evolution.</li>
+      </ul>
+      <div class="callout">The later files should feel like a continuous ladder, not three disconnected flash-attention demos.</div>
+      <div class="footer"><span>Use arrow keys</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

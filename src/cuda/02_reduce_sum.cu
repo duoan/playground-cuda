@@ -7,8 +7,18 @@
 
 namespace {
 
+// This file follows one teaching rule:
+// keep the whole optimization ladder in one place.
+//
+// Current ladder:
+// 1. atomic
+// 2. shared-memory tree reduction
+// 3. warp-aware reduction
+// 4. multi-elements-per-thread / hierarchical reduction
+
 constexpr int kThreadsPerBlock = 256;
 constexpr int kWarpSize = 32;
+constexpr int kChunkItemsPerThread = 4;
 
 struct ReductionRun {
   float value = 0.0f;
@@ -151,6 +161,49 @@ __global__ void reduce_sum_warp_kernel(
   }
 }
 
+// 第四版: multi-elements-per-thread / hierarchical reduction。
+//
+// 这一步和 shared-memory tree reduction 的区别是:
+// - 每个 thread 不再只读一个值
+// - 而是先在寄存器里累加多个值
+// - 再把每个 thread 的局部和交给 block 内规约
+//
+// 这在真实 kernel 里很常见，因为它能减少“线程管理成本”，
+// 让每个 thread 先做更多有用工作再去同步。
+__global__ void reduce_sum_chunked_kernel(
+    const float* input,
+    float* block_sums,
+    int count) {
+  extern __shared__ float shared[];
+
+  const int tid = threadIdx.x;
+  const int block_start = blockIdx.x * blockDim.x * kChunkItemsPerThread;
+  const int thread_start = block_start + tid;
+
+  float local_sum = 0.0f;
+  #pragma unroll
+  for (int item = 0; item < kChunkItemsPerThread; ++item) {
+    const int index = thread_start + item * blockDim.x;
+    if (index < count) {
+      local_sum += input[index];
+    }
+  }
+
+  shared[tid] = local_sum;
+  __syncthreads();
+
+  for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {
+    if (tid < offset) {
+      shared[tid] += shared[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    block_sums[blockIdx.x] = shared[0];
+  }
+}
+
 ReductionRun run_atomic_reduction(const std::vector<float>& host_input) {
   float* device_input = nullptr;
   float* device_output = nullptr;
@@ -241,6 +294,39 @@ ReductionRun run_warp_reduction(const std::vector<float>& host_input) {
       });
 }
 
+ReductionRun run_chunked_hierarchical_reduction(const std::vector<float>& host_input) {
+  float* current_input = nullptr;
+  const size_t input_bytes = host_input.size() * sizeof(float);
+  CHECK_CUDA(cudaMalloc(&current_input, input_bytes));
+  CHECK_CUDA(cudaMemcpy(current_input, host_input.data(), input_bytes, cudaMemcpyHostToDevice));
+
+  int current_count = static_cast<int>(host_input.size());
+  int stages = 0;
+
+  while (current_count > 1) {
+    const int block_span = kThreadsPerBlock * kChunkItemsPerThread;
+    const int blocks = cuda_utils::ceil_div(current_count, block_span);
+    float* next_output = nullptr;
+    CHECK_CUDA(cudaMalloc(&next_output, blocks * sizeof(float)));
+
+    reduce_sum_chunked_kernel<<<blocks, kThreadsPerBlock, kThreadsPerBlock * sizeof(float)>>>(
+        current_input, next_output, current_count);
+    CHECK_LAST_CUDA_ERROR();
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaFree(current_input));
+    current_input = next_output;
+    current_count = blocks;
+    ++stages;
+  }
+
+  ReductionRun result;
+  result.stages = stages;
+  CHECK_CUDA(cudaMemcpy(&result.value, current_input, sizeof(float), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaFree(current_input));
+  return result;
+}
+
 }  // namespace
 
 int main() {
@@ -262,11 +348,16 @@ int main() {
   // 最后跑 warp-aware 版本，开始接触 warp shuffle 思路。
   const ReductionRun warp_result = run_warp_reduction(host_input);
 
+  // 再往前走一步，让每个 thread 先累加多个元素。
+  // 这会更接近真实高性能 reduction 的组织方式。
+  const ReductionRun chunked_result = run_chunked_hierarchical_reduction(host_input);
+
   const bool atomic_ok = check_output(atomic_result.value, expected, "atomic");
   const bool shared_ok = check_output(shared_result.value, expected, "shared");
   const bool warp_ok = check_output(warp_result.value, expected, "warp");
+  const bool chunked_ok = check_output(chunked_result.value, expected, "chunked");
 
-  if (!atomic_ok || !shared_ok || !warp_ok) {
+  if (!atomic_ok || !shared_ok || !warp_ok || !chunked_ok) {
     return EXIT_FAILURE;
   }
 
@@ -291,6 +382,12 @@ int main() {
   std::cout << "  result: " << warp_result.value << '\n';
   std::cout << "  stages: " << warp_result.stages << '\n';
   std::cout << "  idea: reduce inside warps first, then combine warp partial sums" << '\n';
+  std::cout << '\n';
+
+  std::cout << "[chunked hierarchical reduction]" << '\n';
+  std::cout << "  result: " << chunked_result.value << '\n';
+  std::cout << "  stages: " << chunked_result.stages << '\n';
+  std::cout << "  idea: each thread accumulates multiple values before block reduction" << '\n';
   std::cout << '\n';
 
   std::cout << "All versions: PASS" << '\n';

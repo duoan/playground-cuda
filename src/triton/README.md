@@ -14,3 +14,5 @@ Planned order:
 8. `08_flash_attention_v1.py`
 9. `09_flash_attention_v2.py`
 10. `10_flash_attention_v3.py`
+
+> https://zhuanlan.zhihu.com/p/1902778199261291694

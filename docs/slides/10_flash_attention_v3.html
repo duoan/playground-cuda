@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>10 FlashAttention v3</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">10 FlashAttention v3</div>
+      <h1>Pipeline Thinking Gets Deeper</h1>
+      <p>v3 pushes the same attention math into a more explicit pipeline. The teaching goal is to make modern staged kernels feel readable, not mysterious.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/10_flash_attention_v3.cu</span></div>
+    </section>
+
+    <section class="slide">
+      <h2>Ping-Pong Tile Pipeline</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">Two-stage mental model</div>
+          <div class="pipeline">
+            <div class="pipeline-row">
+              <div class="mono">tile 0</div>
+              <div class="stage load">load s0</div>
+              <div class="stage compute">compute s0</div>
+              <div class="stage">write O</div>
+              <div class="stage"></div>
+            </div>
+            <div class="pipeline-row">
+              <div class="mono">tile 1</div>
+              <div class="stage active">wait</div>
+              <div class="stage load">load s1</div>
+              <div class="stage compute">compute s1</div>
+              <div class="stage">write O</div>
+            </div>
+            <div class="pipeline-row">
+              <div class="mono">tile 2</div>
+              <div class="stage"></div>
+              <div class="stage active">wait</div>
+              <div class="stage load">load s0</div>
+              <div class="stage compute">compute s0</div>
+            </div>
+          </div>
+          <div class="tile-note">The important lesson is not the exact number of stages. It is the overlap: while one stage computes, another stage prepares the next tile.</div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">Code that matches the pipeline</div>
+          <pre class="snippet"><code>int load_stage = tile_index % 2;
+int compute_stage = 1 - load_stage;
+
+preload(next_tile, load_stage);
+__syncthreads();
+consume(current_tile, compute_stage);</code></pre>
+          <div class="caption">This is the teaching bridge toward real async copy / tensor-core pipelines.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Who Does What</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">Roles inside a more modern block</div>
+          <div class="warp-strip">
+            <div class="warp">
+              <div class="lane hot">warp 0<br>stage</div>
+              <div class="lane hot">warp 0<br>stage</div>
+              <div class="lane mid">warp 1<br>QK^T</div>
+              <div class="lane mid">warp 1<br>QK^T</div>
+              <div class="lane cool">warp 2<br>softmax</div>
+              <div class="lane cool">warp 2<br>PV</div>
+              <div class="lane cool">warp 3<br>epilogue</div>
+              <div class="lane cool">warp 3<br>epilogue</div>
+            </div>
+          </div>
+          <div class="tile-note">Again, this is a teaching simplification. The point is to grow the instinct that modern kernels often have specialized groups and explicit stage management.</div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">How to read v3</div>
+          <div class="stack-list">
+            <div class="stack-card"><strong>Not new math</strong> The attention formula is unchanged.</div>
+            <div class="stack-card"><strong>More staging</strong> Data movement becomes a first-class design concern.</div>
+            <div class="stack-card"><strong>Closer to hardware</strong> You are starting to think like tensor-core-era kernels think.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Optimization Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Current</h3><p><span class="mono">CPU/reference -> simplified v3 -> pipeline-oriented</span></p></div>
+        <div class="card"><h3>Question To Review</h3><p><span class="mono">Compared with v2, what is newly emphasized here: more math, or more overlap and staging?</span></p></div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Review Question</h2>
+      <p>When you say a kernel is “pipeline-oriented,” what work is being overlapped with what?</p>
+      <div class="footer"><span>v3 is where pipeline intuition matters</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

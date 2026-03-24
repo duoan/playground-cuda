@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>01 Vector Add</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">01 Vector Add</div>
+      <h1>From One Thread, One Element</h1>
+      <p>This deck should be read exactly like the code file: start from the most naive version, feel its limits, then climb one optimization step at a time.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/01_vector_add.cu</span></div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 0: What Problem Are We Solving?</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">a[i]</div>
+          <div class="arrow">+</div>
+          <div class="node">b[i]</div>
+          <div class="arrow">→</div>
+          <div class="node">c[i]</div>
+        </div>
+      </div>
+      <p>Vector add is intentionally simple. That lets you focus on thread indexing and memory mapping instead of difficult math.</p>
+    </section>
+
+    <section class="slide">
+      <h2>Step 1: Naive Kernel</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">blockIdx.x</div>
+          <div class="arrow">x</div>
+          <div class="node">blockDim.x</div>
+          <div class="arrow">+</div>
+          <div class="node">threadIdx.x</div>
+          <div class="arrow">→</div>
+          <div class="node">global index i</div>
+        </div>
+      </div>
+      <pre class="snippet"><code>const int index = blockIdx.x * blockDim.x + threadIdx.x;
+if (index &lt; count) {
+  c[index] = a[index] + b[index];
+}</code></pre>
+      <div class="caption">One thread owns one output element. This is the most important first mental model in CUDA.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Why Naive Is Not Enough</h2>
+      <div class="stack-list">
+        <div class="stack-card"><strong>Problem 1</strong> A thread only does one tiny unit of work.</div>
+        <div class="stack-card"><strong>Problem 2</strong> If the launch is too small, some data may never be touched.</div>
+        <div class="stack-card"><strong>Problem 3</strong> We are not yet thinking in tiles or chunks of data.</div>
+      </div>
+      <div class="tile-note">The code is correct. The next versions are about teaching better ways to assign larger amounts of work to each block and thread.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 2: Block Tile Thinking</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">One block owns a contiguous chunk</div>
+          <div class="matrix small" style="grid-template-columns: repeat(12, 18px);">
+            <div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div>
+            <div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div>
+            <div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div>
+          </div>
+          <div class="matrix-caption">The highlighted region is one logical tile.</div>
+        </div>
+        <div class="diagram">
+          <pre class="snippet"><code>const int tile_start = blockIdx.x * kTileSize;
+const int thread_base = tile_start + threadIdx.x;
+
+for (int item = 0; item &lt; kItemsPerThread; ++item) {
+  const int index = thread_base + item * kBlockThreads;
+  if (index &lt; count) {
+    c[index] = a[index] + b[index];
+  }
+}</code></pre>
+          <div class="caption">One thread now computes multiple elements inside the block tile.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 3: Grid-Stride Loop</h2>
+      <p>Now we solve a different problem: what if the array is much larger than the first launch covers?</p>
+      <pre class="snippet"><code>for (int i = index; i &lt; count; i += blockDim.x * gridDim.x) {
+  c[i] = a[i] + b[i];
+}</code></pre>
+      <div class="tile-note">The same thread comes back and handles later elements, separated by one full-grid stride. This makes the kernel scale more gracefully.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 4: Vectorized Access</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">load float4</div>
+          <div class="arrow">→</div>
+          <div class="node">add 4 values</div>
+          <div class="arrow">→</div>
+          <div class="node">store float4</div>
+        </div>
+      </div>
+      <p>The math is unchanged. Only memory access becomes wider and more bandwidth-aware.</p>
+    </section>
+
+    <section class="slide">
+      <h2>The Full Learning Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Code Order</h3><p><span class="mono">naive -> block-tiled -> grid-stride -> vectorized</span></p></div>
+        <div class="card"><h3>Question To Ask</h3><p><span class="mono">At each step, what changed: the math, or the work mapping?</span></p></div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Practice Prompt</h2>
+      <p>Open <span class="mono">src/cuda/practice/01_vector_add_practice.cu</span>. Rebuild the ladder yourself in the same order: naive first, then tiled, then grid-stride.</p>
+      <div class="footer"><span>Vector add teaches mapping, not math</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>06 MLP</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">06 MLP</div>
+      <h1>GEMM Plus Activation Plus GEMM</h1>
+      <p>The MLP file takes the matmul ideas and places them inside a real deep-learning block. It is where “operator composition” starts to matter.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/06_mlp.cu</span></div>
+    </section>
+    <section class="slide">
+      <h2>Visual Model + Code</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">xW1 + b1</div>
+          <div class="arrow">→</div>
+          <div class="node">ReLU</div>
+          <div class="arrow">→</div>
+          <div class="node">hidden</div>
+          <div class="arrow">→</div>
+          <div class="node">hiddenW2 + b2</div>
+          <div class="arrow">→</div>
+          <div class="node">y</div>
+        </div>
+      </div>
+      <pre class="snippet"><code>float hidden_acc = b1[hidden_idx];
+hidden_acc += x[...] * w1[...];
+hidden_acc = relu(hidden_acc);
+
+float out_acc = b2[out_idx];
+out_acc += hidden_acc * w2[...];</code></pre>
+      <div class="caption">The optimized versions try to keep more of this chain on chip before writing back to global memory.</div>
+    </section>
+    <section class="slide">
+      <h2>Optimization Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Current</h3><p><span class="mono">CPU -> naive staged -> partially fused -> tiled GEMM-style fused</span></p></div>
+        <div class="card"><h3>Next</h3><p><span class="mono">larger tile shapes and stronger pipeline overlap</span></p></div>
+      </div>
+    </section>
+    <section class="slide">
+      <h2>What To Learn Here</h2>
+      <ul>
+        <li>The MLP is not one operation. It is a pipeline of operations.</li>
+        <li>Fusion becomes valuable because writing intermediate tensors is expensive.</li>
+        <li>The first big optimization lesson is often “do more before going back to global memory.”</li>
+      </ul>
+    </section>
+    <section class="slide">
+      <h2>How To Read The File</h2>
+      <ol>
+        <li>CPU reference first</li>
+        <li>Naive staged GPU version</li>
+        <li>Fused first-stage logic</li>
+        <li>Main correctness comparison</li>
+      </ol>
+    </section>
+    <section class="slide">
+      <h2>Practice Prompt</h2>
+      <p>Open <span class="mono">src/cuda/practice/06_mlp_practice.cu</span>. Start by implementing the activation step cleanly, then think about which intermediate writes you could fuse away.</p>
+      <div class="footer"><span>MLP is where composition becomes performance</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

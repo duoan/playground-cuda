@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>08 FlashAttention v1</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">08 FlashAttention v1</div>
+      <h1>Streaming Tiles With Online Softmax</h1>
+      <p>v1 is the big idea slide: keep the math of attention, but stop materializing the full score matrix. Stream K/V tiles instead.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/08_flash_attention_v1.cu</span></div>
+    </section>
+
+    <section class="slide">
+      <h2>Streaming Picture</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">One Q block stays, K/V tiles stream by</div>
+          <div class="kv-stream">
+            <div class="stream-row">
+              <div class="stage-label">Q block</div>
+              <div class="stream-box hot">fixed</div>
+              <div class="stream-box hot">fixed</div>
+              <div class="stream-box hot">fixed</div>
+              <div class="stream-box hot">fixed</div>
+            </div>
+            <div class="stream-row">
+              <div class="stage-label">K tile</div>
+              <div class="stream-box mid">tile 0</div>
+              <div class="stream-box">tile 1</div>
+              <div class="stream-box">tile 2</div>
+              <div class="stream-box">tile 3</div>
+            </div>
+            <div class="stream-row">
+              <div class="stage-label">V tile</div>
+              <div class="stream-box cool">tile 0</div>
+              <div class="stream-box">tile 1</div>
+              <div class="stream-box">tile 2</div>
+              <div class="stream-box">tile 3</div>
+            </div>
+          </div>
+          <div class="tile-note">The score tile exists only briefly inside the loop. After it updates softmax stats and output, the kernel moves on.</div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">What must be carried across tiles</div>
+          <div class="stack-list">
+            <div class="stack-card"><strong>m</strong> Running row max for numerical stability.</div>
+            <div class="stack-card"><strong>l</strong> Running denominator of softmax.</div>
+            <div class="stack-card"><strong>O</strong> Running output vector, rescaled when the max changes.</div>
+          </div>
+          <pre class="snippet"><code>float new_m = fmaxf(old_m, tile_max);
+float scale_old = expf(old_m - new_m);
+float scale_new = expf(tile_max - new_m);
+new_l = old_l * scale_old + tile_l * scale_new;</code></pre>
+          <div class="caption">These three state variables are the heart of online softmax.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Why Online Softmax Works</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">Old view</div>
+          <div class="flow">
+            <div class="node">all scores</div>
+            <div class="arrow">→</div>
+            <div class="node">row max</div>
+            <div class="arrow">→</div>
+            <div class="node">row sum</div>
+            <div class="arrow">→</div>
+            <div class="node">output</div>
+          </div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">v1 view</div>
+          <div class="flow">
+            <div class="node">score tile</div>
+            <div class="arrow">→</div>
+            <div class="node">update m/l</div>
+            <div class="arrow">→</div>
+            <div class="node">rescale O</div>
+            <div class="arrow">→</div>
+            <div class="node">next tile</div>
+          </div>
+          <div class="tile-note">The algorithm becomes streaming. Memory drops because the giant intermediate score tensor disappears.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Optimization Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Current</h3><p><span class="mono">CPU/reference -> simplified v1 -> shared-memory staged</span></p></div>
+        <div class="card"><h3>Question To Review</h3><p><span class="mono">If scores are never stored globally, what state must survive from one tile to the next?</span></p></div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Review Question</h2>
+      <p>Why is the running output <span class="mono">O</span> not simply added to tile by tile? Why does it have to be rescaled when the running max changes?</p>
+      <div class="footer"><span>v1 is the algorithmic leap</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

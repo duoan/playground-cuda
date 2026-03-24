@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>02 Reduce Sum</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">02 Reduce Sum</div>
+      <h1>From Correctness To Cooperation</h1>
+      <p>Reduction should also be learned as a ladder. We start with the easiest correct version, then improve how threads cooperate.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/02_reduce_sum.cu</span></div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 0: What Makes Reduction Different?</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">many inputs</div>
+          <div class="arrow">→</div>
+          <div class="node">one output</div>
+        </div>
+      </div>
+      <p>Elementwise kernels are easy because threads do not need each other. Reduction is different: many threads want to contribute to one final value.</p>
+    </section>
+
+    <section class="slide">
+      <h2>Step 1: Atomic Version</h2>
+      <pre class="snippet"><code>const int index = blockIdx.x * blockDim.x + threadIdx.x;
+if (index &lt; count) {
+  atomicAdd(output, input[index]);
+}</code></pre>
+      <div class="stack-list">
+        <div class="stack-card"><strong>Why start here?</strong> It is easy to explain and obviously correct.</div>
+        <div class="stack-card"><strong>Why not stop here?</strong> Too many threads fight over one memory location.</div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Why Atomics Become A Bottleneck</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">thread 0</div>
+          <div class="arrow">↘</div>
+          <div class="node">same output</div>
+          <div class="arrow">↗</div>
+          <div class="node">thread 255</div>
+        </div>
+      </div>
+      <div class="tile-note">All threads are serialized around the same destination. So the next optimization idea is obvious: reduce locally first, then write fewer partial sums.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 2: Shared-Memory Tree Reduction</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">Tree pattern inside one block</div>
+          <div class="flow">
+            <div class="node">256</div>
+            <div class="arrow">→</div>
+            <div class="node">128</div>
+            <div class="arrow">→</div>
+            <div class="node">64</div>
+            <div class="arrow">→</div>
+            <div class="node">32</div>
+            <div class="arrow">→</div>
+            <div class="node">1</div>
+          </div>
+        </div>
+        <div class="diagram">
+          <pre class="snippet"><code>shared[threadIdx.x] = input[global_index];
+__syncthreads();
+
+for (int offset = blockDim.x / 2; offset &gt; 0; offset /= 2) {
+  if (threadIdx.x &lt; offset) {
+    shared[threadIdx.x] += shared[threadIdx.x + offset];
+  }
+  __syncthreads();
+}</code></pre>
+          <div class="caption">Now each block produces one partial sum instead of every thread updating the final answer directly.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Why Tree Reduction Is Better</h2>
+      <div class="stack-list">
+        <div class="stack-card"><strong>Shared memory is local</strong> Block-local communication is cheaper than global contention.</div>
+        <div class="stack-card"><strong>Traffic drops</strong> One block writes one partial result, not hundreds of atomic updates.</div>
+        <div class="stack-card"><strong>But</strong> We still pay for a lot of block-wide synchronization.</div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 3: Warp-Aware Reduction</h2>
+      <p>Once the active values fit inside a warp, we no longer need full-block synchronization for every final step.</p>
+      <pre class="snippet"><code>for (int offset = warpSize / 2; offset &gt; 0; offset /= 2) {
+  value += __shfl_down_sync(0xffffffff, value, offset);
+}</code></pre>
+      <div class="tile-note">This is the next layer of the ladder: move from block-wide cooperation to warp-level exchange.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 4: Hierarchical Chunking</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">one thread loads many elements</div>
+          <div class="arrow">→</div>
+          <div class="node">thread-local sum</div>
+          <div class="arrow">→</div>
+          <div class="node">block reduction</div>
+        </div>
+      </div>
+      <p>Before the shared-memory tree even begins, each thread can pre-accumulate a chunk of data. That reduces pressure on the later stages.</p>
+    </section>
+
+    <section class="slide">
+      <h2>The Full Learning Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Code Order</h3><p><span class="mono">atomic -> shared-memory tree -> warp-aware -> hierarchical chunked</span></p></div>
+        <div class="card"><h3>Question To Ask</h3><p><span class="mono">At each step, where does the partial sum live: global memory, shared memory, warp registers, or thread-local registers?</span></p></div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Practice Prompt</h2>
+      <p>Open <span class="mono">src/cuda/practice/02_reduce_sum_practice.cu</span>. Implement the atomic version first, then explain exactly why the tree version is still the same math but a better execution plan.</p>
+      <div class="footer"><span>Reduction teaches cooperation</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

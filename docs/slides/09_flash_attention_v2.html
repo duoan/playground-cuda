@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>09 FlashAttention v2</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">09 FlashAttention v2</div>
+      <h1>Better Work Partition</h1>
+      <p>v2 keeps the v1 idea, but organizes the machine better: clearer warp roles, better tile reuse, and less idle hardware.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/09_flash_attention_v2.cu</span></div>
+    </section>
+
+    <section class="slide">
+      <h2>Warp Role Picture</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">One block, different warp jobs</div>
+          <div class="warp-label">Producer / consumer idea</div>
+          <div class="warp-strip">
+            <div class="warp">
+              <div class="lane hot">w0<br>load K</div>
+              <div class="lane hot">w0<br>load K</div>
+              <div class="lane hot">w0<br>load V</div>
+              <div class="lane hot">w0<br>load V</div>
+              <div class="lane mid">w1<br>QK^T</div>
+              <div class="lane mid">w1<br>QK^T</div>
+              <div class="lane cool">w2<br>softmax</div>
+              <div class="lane cool">w2<br>PV</div>
+            </div>
+          </div>
+          <div class="tile-note">The exact mapping differs in real kernels, but the key lesson is this: not every warp has to do the same job at the same moment.</div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">Code that reflects warp specialization</div>
+          <pre class="snippet"><code>const int lane = threadIdx.x % warpSize;
+const int warp_id = threadIdx.x / warpSize;
+
+if (warp_id == 0) { /* stage shared tiles */ }
+if (warp_id == 1) { /* compute score fragments */ }
+if (warp_id == 2) { /* update softmax/output */ }</code></pre>
+          <div class="caption">v2 is not new math. It is a better answer to “who should load, who should compute, and when?”</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Tile Reuse View</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">Shared-memory staging</div>
+          <div class="flow">
+            <div class="node">shared K tile</div>
+            <div class="arrow">+</div>
+            <div class="node">shared V tile</div>
+            <div class="arrow">→</div>
+            <div class="node">multiple warp consumers</div>
+          </div>
+          <div class="tile-note">v1 taught streaming. v2 teaches better cooperation on the same streamed tiles.</div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">What improved over v1</div>
+          <div class="stack-list">
+            <div class="stack-card"><strong>Partitioning</strong> Different warp groups can focus on staging or computing.</div>
+            <div class="stack-card"><strong>Reuse</strong> Shared tiles are consumed more efficiently.</div>
+            <div class="stack-card"><strong>Throughput</strong> The kernel starts to care about keeping more of the SM busy.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Optimization Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Current</h3><p><span class="mono">CPU/reference -> simplified v2 -> warp-specialized</span></p></div>
+        <div class="card"><h3>Question To Review</h3><p><span class="mono">What changed from v1 to v2: the algorithm itself, or the scheduling of work?</span></p></div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Review Question</h2>
+      <p>If online softmax was already correct in v1, why can v2 still be much faster?</p>
+      <div class="footer"><span>v2 is about execution planning</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>03 Softmax</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">03 Softmax</div>
+      <h1>From Stable Math To Attention-Ready Softmax</h1>
+      <p>This deck follows the code ladder: stable CPU idea first, then naive GPU, then cooperative block softmax, then online and transformer-aware variants.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/03_softmax.cu</span></div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 0: The Math Skeleton</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">row x</div>
+          <div class="arrow">→</div>
+          <div class="node">row max</div>
+          <div class="arrow">→</div>
+          <div class="node">exp(x - max)</div>
+          <div class="arrow">→</div>
+          <div class="node">row sum</div>
+          <div class="arrow">→</div>
+          <div class="node">normalize</div>
+        </div>
+      </div>
+      <p>Softmax is not mysterious. It is two reductions plus one elementwise normalization.</p>
+    </section>
+
+    <section class="slide">
+      <h2>Step 1: Stable Reference Version</h2>
+      <pre class="snippet"><code>float max_value = row_ptr[0];
+for (int col = 1; col &lt; cols; ++col) {
+  max_value = fmaxf(max_value, row_ptr[col]);
+}
+
+float row_sum = 0.0f;
+for (int col = 0; col &lt; cols; ++col) {
+  row_sum += expf(row_ptr[col] - max_value);
+}</code></pre>
+      <div class="caption">Subtracting the max is the first lesson. Without it, the math can overflow badly.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 2: Naive GPU Softmax</h2>
+      <div class="stack-list">
+        <div class="stack-card"><strong>Idea</strong> One thread handles one row by itself.</div>
+        <div class="stack-card"><strong>Why good for learning</strong> It matches the CPU logic almost exactly.</div>
+        <div class="stack-card"><strong>Why limited</strong> One thread does too much serial work on long rows.</div>
+      </div>
+      <div class="tile-note">This is the same learning move as before: start with a direct mapping, then ask how to make more threads cooperate on one row.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 3: Block Cooperative Softmax</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">One row shared across a block</div>
+          <div class="matrix small" style="grid-template-columns: repeat(8, 18px);">
+            <div class="cell sm c hot"></div><div class="cell sm c hot"></div><div class="cell sm c hot"></div><div class="cell sm c hot"></div>
+            <div class="cell sm c hot"></div><div class="cell sm c hot"></div><div class="cell sm c hot"></div><div class="cell sm c hot"></div>
+          </div>
+          <div class="matrix-caption">Different threads cover different columns of the same row.</div>
+        </div>
+        <div class="diagram">
+          <pre class="snippet"><code>// partial row max
+// block reduction
+// partial row sum
+// block reduction
+// normalize row values</code></pre>
+          <div class="caption">Now the row becomes a cooperative reduction problem, much like reduce_sum.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Why Another Step Is Needed</h2>
+      <div class="stack-list">
+        <div class="stack-card"><strong>Problem</strong> Standard softmax still assumes you can logically see the whole row together.</div>
+        <div class="stack-card"><strong>But attention wants more</strong> In tiled attention, scores arrive chunk by chunk.</div>
+      </div>
+      <p>That is why the next version is online softmax.</p>
+    </section>
+
+    <section class="slide">
+      <h2>Step 4: Online Softmax</h2>
+      <pre class="snippet"><code>new_m = max(old_m, tile_max);
+new_l = old_l * exp(old_m - new_m)
+      + tile_l * exp(tile_max - new_m);</code></pre>
+      <div class="tile-note">Online softmax is the bridge to FlashAttention. It lets you update softmax statistics tile by tile instead of needing the full row at once.</div>
+    </section>
+
+    <section class="slide">
+      <h2>Step 5: Masked And Causal Variants</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">softmax row</div>
+          <div class="arrow">+</div>
+          <div class="node">mask rule</div>
+          <div class="arrow">→</div>
+          <div class="node">transformer-ready row</div>
+        </div>
+      </div>
+      <p>Now the kernel is no longer just “softmax.” It becomes the exact variant that attention workloads need.</p>
+    </section>
+
+    <section class="slide">
+      <h2>The Full Learning Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Code Order</h3><p><span class="mono">CPU -> naive -> block/shared-memory -> online -> masked -> causal</span></p></div>
+        <div class="card"><h3>Question To Ask</h3><p><span class="mono">At each step, what got better: stability, parallelism, or compatibility with attention-style tiling?</span></p></div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Practice Prompt</h2>
+      <p>Open <span class="mono">src/cuda/practice/03_softmax_practice.cu</span>. First build a correct stable row softmax, then turn that row into a block-cooperative reduction problem.</p>
+      <div class="footer"><span>Softmax is reduction with structure</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

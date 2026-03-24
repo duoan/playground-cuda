@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>00 Device Query</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">00 Device Query</div>
+      <h1>Know Your GPU First</h1>
+      <p>This kernel is the warm-up. Before optimizing anything, we need to know what hardware and runtime environment we are standing on.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/00_device_query.cu</span></div>
+    </section>
+    <section class="slide">
+      <h2>Visual Model</h2>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">CUDA Runtime API</div>
+          <div class="arrow">→</div>
+          <div class="node">device count</div>
+          <div class="arrow">→</div>
+          <div class="node">device properties</div>
+          <div class="arrow">→</div>
+          <div class="node">print facts</div>
+        </div>
+      </div>
+      <pre class="snippet"><code>int device_count = 0;
+CHECK_CUDA(cudaGetDeviceCount(&amp;device_count));
+
+cudaDeviceProp props{};
+CHECK_CUDA(cudaGetDeviceProperties(&amp;props, device));
+
+std::cout &lt;&lt; props.name &lt;&lt; '\n';</code></pre>
+      <div class="caption">This file is pure host-side inspection. It tells you what machine your kernels will run on.</div>
+    </section>
+    <section class="slide">
+      <h2>What It Teaches</h2>
+      <ul>
+        <li>How to call the CUDA Runtime API from a tiny program.</li>
+        <li>What a device count and device properties object look like.</li>
+        <li>Why hardware facts matter before we talk about tiles, warps, and performance.</li>
+      </ul>
+    </section>
+    <section class="slide">
+      <h2>What To Read In The Code</h2>
+      <ol>
+        <li><span class="mono">CHECK_CUDA(cudaGetDeviceCount(...))</span></li>
+        <li><span class="mono">cudaGetDeviceProperties(...)</span></li>
+        <li>How host-side printing turns raw device properties into human-readable facts.</li>
+      </ol>
+      <div class="callout">This file is not about optimization. It is about grounding.</div>
+    </section>
+    <section class="slide">
+      <h2>Review Questions</h2>
+      <ul>
+        <li>What is the difference between host code and device code in this file?</li>
+        <li>What property tells you the GPU generation level? Answer: compute capability.</li>
+        <li>Why do you care about max threads per block before writing kernels?</li>
+      </ul>
+    </section>
+    <section class="slide">
+      <h2>Next Step</h2>
+      <p>After you know the GPU, move to <span class="mono">01_vector_add.cu</span>. That is where the CUDA execution model starts to become concrete.</p>
+      <div class="footer"><span>Use arrow keys</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>

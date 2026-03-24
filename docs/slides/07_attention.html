@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>07 Attention</title>
+  <link rel="stylesheet" href="assets/slides.css">
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">07 Attention</div>
+      <h1>Where Earlier Kernels Meet</h1>
+      <p>Attention combines GEMM-like score computation, row-wise softmax, and a weighted sum over values. It is the first operator in the repo that truly forces you to think about dataflow.</p>
+      <div class="callout">Source: <span class="mono">src/cuda/07_attention.cu</span></div>
+    </section>
+
+    <section class="slide">
+      <h2>Equation To Matrix Picture</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">Step 1: build scores</div>
+          <div class="diagram-row">
+            <div>
+              <div class="matrix-label">Q</div>
+              <div class="matrix small" style="grid-template-columns: repeat(4, 18px);">
+                <div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div>
+                <div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div>
+                <div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div>
+                <div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div><div class="cell sm a"></div>
+              </div>
+            </div>
+            <div class="matrix-operator">x</div>
+            <div>
+              <div class="matrix-label">K^T</div>
+              <div class="matrix small" style="grid-template-columns: repeat(4, 18px);">
+                <div class="cell sm b hot"></div><div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div>
+                <div class="cell sm b hot"></div><div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div>
+                <div class="cell sm b hot"></div><div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div>
+                <div class="cell sm b hot"></div><div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div>
+              </div>
+            </div>
+            <div class="matrix-operator">=</div>
+            <div>
+              <div class="matrix-label">Scores</div>
+              <div class="matrix small" style="grid-template-columns: repeat(4, 18px);">
+                <div class="cell sm c cool"></div><div class="cell sm c cool"></div><div class="cell sm c cool"></div><div class="cell sm c cool"></div>
+                <div class="cell sm c"></div><div class="cell sm c"></div><div class="cell sm c"></div><div class="cell sm c"></div>
+                <div class="cell sm c"></div><div class="cell sm c"></div><div class="cell sm c"></div><div class="cell sm c"></div>
+                <div class="cell sm c"></div><div class="cell sm c"></div><div class="cell sm c"></div><div class="cell sm c"></div>
+              </div>
+            </div>
+          </div>
+          <div class="tile-note">One query row dots with every key row. That gives one score row. Then softmax normalizes that row before V is used.</div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">Step 2: apply softmax and V</div>
+          <div class="diagram-row">
+            <div>
+              <div class="matrix-label">Probabilities</div>
+              <div class="matrix small" style="grid-template-columns: repeat(4, 18px);">
+                <div class="cell sm c cool"></div><div class="cell sm c cool"></div><div class="cell sm c cool"></div><div class="cell sm c cool"></div>
+              </div>
+            </div>
+            <div class="matrix-operator">x</div>
+            <div>
+              <div class="matrix-label">V</div>
+              <div class="matrix small" style="grid-template-columns: repeat(4, 18px);">
+                <div class="cell sm b hot"></div><div class="cell sm b hot"></div><div class="cell sm b hot"></div><div class="cell sm b hot"></div>
+                <div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div>
+                <div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div>
+                <div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div><div class="cell sm b"></div>
+              </div>
+            </div>
+            <div class="matrix-operator">=</div>
+            <div>
+              <div class="matrix-label">Output Row</div>
+              <div class="matrix small" style="grid-template-columns: repeat(4, 18px);">
+                <div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div><div class="cell sm a hot"></div>
+              </div>
+            </div>
+          </div>
+          <pre class="snippet"><code>score += q[q_idx * head_dim + d] * k[k_idx * head_dim + d];
+prob = expf(score - row_max) / row_sum;
+out += prob * v[k_idx * head_dim + d];</code></pre>
+          <div class="caption">This is literally GEMM-ish dot products, then softmax, then another weighted accumulation.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Tile Movement View</h2>
+      <div class="diagram-grid">
+        <div class="diagram">
+          <div class="mini-title">Attention dataflow</div>
+          <div class="flow">
+            <div class="node">Q block</div>
+            <div class="arrow">x</div>
+            <div class="node">K tile</div>
+            <div class="arrow">→</div>
+            <div class="node">score tile</div>
+            <div class="arrow">→</div>
+            <div class="node">row max / row sum</div>
+            <div class="arrow">→</div>
+            <div class="node">V tile update</div>
+          </div>
+          <div class="tile-note">FlashAttention does not change the math. It changes how these tiles are visited so the score matrix never has to live in full in HBM.</div>
+        </div>
+        <div class="diagram">
+          <div class="mini-title">What to map in your head</div>
+          <div class="stack-list">
+            <div class="stack-card"><strong>Q tile</strong> Queries are often kept fixed while keys stream past.</div>
+            <div class="stack-card"><strong>K tile</strong> Produces a small score tile with the current Q tile.</div>
+            <div class="stack-card"><strong>Softmax state</strong> Row max and row sum must be updated stably.</div>
+            <div class="stack-card"><strong>V tile</strong> Uses the normalized weights to accumulate output.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Optimization Ladder</h2>
+      <div class="grid two">
+        <div class="card"><h3>Current</h3><p><span class="mono">CPU -> naive decomposition -> tiled/online-softmax -> causal support</span></p></div>
+        <div class="card"><h3>Question To Review</h3><p><span class="mono">Which part is memory-hungry: storing scores, or updating output one tile at a time?</span></p></div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>Practice Prompt</h2>
+      <p>Open <span class="mono">src/cuda/practice/07_attention_practice.cu</span>. First implement only the score computation. Then add softmax. Then add the V accumulation. Learn the operator in those three layers.</p>
+      <div class="footer"><span>Attention is the meeting point of the project</span><span data-counter></span></div>
+    </section>
+  </main>
+  <div class="controls"><button data-prev>Prev</button><button data-next>Next</button></div>
+  <script src="assets/slides.js"></script>
+</body>
+</html>
