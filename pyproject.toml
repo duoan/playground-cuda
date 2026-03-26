@@ -9,7 +9,9 @@ description = "Python helpers and examples for the playground-cuda repo."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "matplotlib>=3.10.8",
     "numpy>=2.2.6",
+    "pandas>=2.3.3",
     "tensorboard>=2.20.0",
     "tensorboardx>=2.6.4",
     "torch>=2.10.0",
