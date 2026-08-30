@@ -95,8 +95,8 @@ void tensorAdd3D_cpu(const float* A, const float* B, float* C, int depth, int he
 __global__ void tensorAdd3D_kernel(const float* A, const float* B, float* C, int depth, int height, int width) {
     // Calculate 3D coordinates from thread indices
     int w = blockIdx.x * blockDim.x + threadIdx.x;  // Width (x-dimension)
-    int h = blockIdx.y * blockDim.y + threadIdx.y;   // Height (y-dimension)
-    int d = blockIdx.z * blockDim.z + threadIdx.z;   // Depth (z-dimension)
+    int h = blockIdx.y * blockDim.y + threadIdx.y;  // Height (y-dimension)
+    int d = blockIdx.z * blockDim.z + threadIdx.z;  // Depth (z-dimension)
 
     // Bounds check to ensure we don't access out-of-range elements
     if (d < depth && h < height && w < width) {
@@ -226,8 +226,8 @@ int main() {
     // evenly divisible by the thread block size
     dim3 blocksPerGrid(
         (width + threadsPerBlock.x - 1) / threadsPerBlock.x,   // Blocks in x-dimension (width)
-        (height + threadsPerBlock.y - 1) / threadsPerBlock.y,   // Blocks in y-dimension (height)
-        (depth + threadsPerBlock.z - 1) / threadsPerBlock.z     // Blocks in z-dimension (depth)
+        (height + threadsPerBlock.y - 1) / threadsPerBlock.y,  // Blocks in y-dimension (height)
+        (depth + threadsPerBlock.z - 1) / threadsPerBlock.z    // Blocks in z-dimension (depth)
     );
     
     // Example calculation for dimensions 128x128x32, threadsPerBlock 8x8x8:
