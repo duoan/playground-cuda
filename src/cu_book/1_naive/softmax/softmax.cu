@@ -1,5 +1,3 @@
-#include <iomanip>
-
 #include "../common.h"
 
 void softmax_cpu(const float* in, float* out, int num_rows, int num_cols) {
