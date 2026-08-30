@@ -3,6 +3,17 @@
     "*.cu": "cuda-cpp",
     "*.cuh": "cuda-cpp"
   },
+  "C_Cpp.codeAnalysis.clangTidy.checks.enabled": [
+    "google-*",
+    "modernize-*",
+    "performance-*",
+    "clang-analyzer-*",
+    "misc-*"
+  ],
+  "C_Cpp.codeAnalysis.clangTidy.checks.disabled": [
+    "modernize-macro-to-enum",
+    "misc-include-cleaner"
+  ],
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
   "python.analysis.extraPaths": [
     "${workspaceFolder}/python"

@@ -5,17 +5,23 @@
       "name": "linux-gcc-x64",
       "compilerPath": "/usr/bin/gcc",
       "intelliSenseMode": "linux-gcc-x64",
-      "cStandard": "${default}",
-      "cppStandard": "${default}",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
       "includePath": [
-        "${workspaceFolder}/src/cuda",
-        "${workspaceFolder}/src/cuda/common",
+        "${workspaceFolder}/src",
+        "${workspaceFolder}/src/**",
         "/usr/local/cuda/include"
+      ],
+      "defines": [
+        "__CUDACC__",
+        "__CUDA_ARCH__=800"
+      ],
+      "forcedInclude": [
+        "/usr/local/cuda/include/cuda_runtime.h"
       ],
       "browse": {
         "path": [
-          "${workspaceFolder}/src/cuda",
-          "${workspaceFolder}/src/cuda/common",
+          "${workspaceFolder}/src",
           "/usr/local/cuda/include"
         ],
         "limitSymbolsToIncludedHeaders": true
