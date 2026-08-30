@@ -52,7 +52,7 @@ int main() {
     // Run CPU version with timing
     // Timer uses RAII pattern: timing starts at construction, ends at destruction
     {
-        Timer cpu_timer("CPU Vector Addition");
+        CpuTimer cpu_timer("CPU Vector Addition");
         vector_add_cpu(h_a, h_b, h_c_cpu, n);
     }  // Timer prints elapsed time here
 

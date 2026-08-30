@@ -60,7 +60,7 @@ int main() {
     // Run CPU version with timing
     // Timer uses RAII pattern: timing starts at construction, ends at destruction
     {
-        Timer cpu_timer("CPU Matrix Transpose");
+        CpuTimer cpu_timer("CPU Matrix Transpose");
         transpose_cpu(h_in, h_out_cpu, num_rows, num_cols);
     }  // Timer prints elapsed time here
 

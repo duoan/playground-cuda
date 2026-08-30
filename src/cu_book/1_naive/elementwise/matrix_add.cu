@@ -71,7 +71,7 @@ int main() {
     // Run CPU version with timing
     // Timer uses RAII pattern: timing starts at construction, ends at destruction
     {
-        Timer cpu_timer("CPU Matrix Addition");
+        CpuTimer cpu_timer("CPU Matrix Addition");
         matrix_add_cpu(h_A, h_B, h_C_cpu, num_rows, num_cols);
     }  // Timer prints elapsed time here
 

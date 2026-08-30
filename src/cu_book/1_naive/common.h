@@ -8,27 +8,28 @@
  * Timer class for measuring execution time of operations
  * Automatically prints elapsed time when destroyed (RAII pattern)
  */
-class Timer {
-private:
+class CpuTimer {
+   private:
     std::chrono::high_resolution_clock::time_point start_time;
     std::string name;
 
-public:
+   public:
     /**
      * Constructor - starts timing immediately
      * @param operation_name Name of the operation being timed (optional)
      */
-    Timer(const std::string& operation_name = "") : name(operation_name) {
+    CpuTimer(const std::string& operation_name = "") : name(operation_name) {
         start_time = std::chrono::high_resolution_clock::now();
     }
 
     /**
      * Destructor - automatically prints elapsed time if name was provided
      */
-    ~Timer() {
+    ~CpuTimer() {
         if (!name.empty()) {
             auto end_time = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
             std::cout << name << " took " << duration.count() << " ms" << std::endl;
         }
     }
@@ -36,9 +37,7 @@ public:
     /**
      * Reset the timer to start timing from now
      */
-    void reset() {
-        start_time = std::chrono::high_resolution_clock::now();
-    }
+    void reset() { start_time = std::chrono::high_resolution_clock::now(); }
 
     /**
      * Get elapsed time in milliseconds without stopping the timer
@@ -55,15 +54,15 @@ public:
  * Wraps CUDA calls and exits with error message if operation fails
  * @param call CUDA function call to check
  */
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
-        if (error != cudaSuccess) { \
-            std::cerr << "CUDA Error: " << cudaGetErrorString(error) \
-                      << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-            exit(1); \
-        } \
-    } while(0)
+#define CUDA_CHECK(call)                                                                          \
+    do {                                                                                          \
+        cudaError_t error = call;                                                                 \
+        if (error != cudaSuccess) {                                                               \
+            std::cerr << "CUDA Error: " << cudaGetErrorString(error) << " at " << __FILE__ << ":" \
+                      << __LINE__ << std::endl;                                                   \
+            exit(1);                                                                              \
+        }                                                                                         \
+    } while (0)
 
 /**
  * RAII GPU timer using cudaEvent (GPU-clock, ~0.5us precision).
@@ -88,14 +87,14 @@ public:
  *     cudaDeviceSynchronize() is needed.
  */
 class GpuTimer {
-private:
+   private:
     cudaEvent_t start_event;
     cudaEvent_t stop_event;
     cudaStream_t stream;
     std::chrono::high_resolution_clock::time_point host_start;
     std::string name;
 
-public:
+   public:
     GpuTimer(const std::string& operation_name = "", cudaStream_t s = 0)
         : stream(s), name(operation_name) {
         CUDA_CHECK(cudaEventCreate(&start_event));
@@ -130,7 +129,7 @@ public:
  * @param ptr Pointer to pointer that will hold allocated memory
  * @param size Number of elements to allocate
  */
-template<typename T>
+template <typename T>
 void allocate_host(T** ptr, size_t size) {
     *ptr = (T*)malloc(size * sizeof(T));
     if (*ptr == nullptr) {
@@ -144,7 +143,7 @@ void allocate_host(T** ptr, size_t size) {
  * @param d_ptr Pointer to pointer that will hold allocated device memory
  * @param size Number of elements to allocate
  */
-template<typename T>
+template <typename T>
 void allocate_device(T** d_ptr, size_t size) {
     CUDA_CHECK(cudaMalloc((void**)d_ptr, size * sizeof(T)));
 }
@@ -155,7 +154,7 @@ void allocate_device(T** d_ptr, size_t size) {
  * @param h_src Source host memory pointer
  * @param size Number of elements to copy
  */
-template<typename T>
+template <typename T>
 void copy_to_device(T* d_dst, const T* h_src, size_t size) {
     CUDA_CHECK(cudaMemcpy(d_dst, h_src, size * sizeof(T), cudaMemcpyHostToDevice));
 }
@@ -166,7 +165,7 @@ void copy_to_device(T* d_dst, const T* h_src, size_t size) {
  * @param d_src Source device memory pointer
  * @param size Number of elements to copy
  */
-template<typename T>
+template <typename T>
 void copy_to_host(T* h_dst, const T* d_src, size_t size) {
     CUDA_CHECK(cudaMemcpy(h_dst, d_src, size * sizeof(T), cudaMemcpyDeviceToHost));
 }
@@ -175,7 +174,7 @@ void copy_to_host(T* h_dst, const T* d_src, size_t size) {
  * Free host (CPU) memory
  * @param ptr Pointer to memory to free
  */
-template<typename T>
+template <typename T>
 void free_host(T* ptr) {
     free(ptr);
 }
@@ -184,7 +183,7 @@ void free_host(T* ptr) {
  * Free device (GPU) memory
  * @param d_ptr Pointer to device memory to free
  */
-template<typename T>
+template <typename T>
 void free_device(T* d_ptr) {
     CUDA_CHECK(cudaFree(d_ptr));
 }
@@ -197,11 +196,12 @@ void free_device(T* d_ptr) {
  * @param tolerance Maximum allowed difference between elements
  * @return true if arrays match within tolerance, false otherwise
  */
-bool verify_results(const float* result, const float* reference, size_t size, float tolerance = 1e-5f) {
+bool verify_results(const float* result, const float* reference, size_t size,
+                    float tolerance = 1e-5f) {
     for (size_t i = 0; i < size; ++i) {
         if (std::abs(result[i] - reference[i]) > tolerance) {
-            std::cout << "Verification failed at index " << i
-                      << ": got " << result[i] << ", expected " << reference[i] << std::endl;
+            std::cout << "Verification failed at index " << i << ": got " << result[i]
+                      << ", expected " << reference[i] << std::endl;
             return false;
         }
     }
