@@ -17,8 +17,12 @@ __global__ void vector_add_naive_kernel(
     const float* a,
     const float* b,
     float* c,
-    int count) {
-  // TODO
+    int N) {
+  // one thread computes one output element
+  const int idx = blockDim.x * blockIdx.x + threadIdx.x;
+  if (idx < N) { // guard against out-of-bounds access
+    c[idx] = a[idx] + b[idx];
+  }
 }
 
 void fill_inputs(std::vector<float>& a, std::vector<float>& b) {
@@ -43,7 +47,7 @@ bool check_output(
 }  // namespace
 
 int main() {
-  constexpr int count = 1024;
+  constexpr int count = 1<<20;
 
   std::vector<float> host_a(count);
   std::vector<float> host_b(count);
