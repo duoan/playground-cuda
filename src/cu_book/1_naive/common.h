@@ -66,6 +66,66 @@ public:
     } while(0)
 
 /**
+ * RAII GPU timer using cudaEvent (GPU-clock, ~0.5us precision).
+ *
+ * Prints two numbers on destruction:
+ *   - gpu:  time the kernel(s) actually spent on the GPU (cudaEvent).
+ *   - wall: host wall-clock from ctor to dtor, includes launch overhead,
+ *           driver queueing, and the final cudaEventSynchronize().
+ *
+ * wall - gpu roughly = launch overhead + sync latency. For tiny kernels
+ * wall can be much larger than gpu; for big kernels they converge.
+ *
+ * Usage:
+ *   {
+ *       GpuTimer t("GPU Matrix Transpose");
+ *       my_kernel<<<grid, block>>>(...);
+ *   }  // dtor syncs, prints "<name>  gpu: X us  wall: Y us"
+ *
+ * Notes:
+ *   - Times work on the given stream (default: stream 0).
+ *   - Dtor calls cudaEventSynchronize on the stop event, so no extra
+ *     cudaDeviceSynchronize() is needed.
+ */
+class GpuTimer {
+private:
+    cudaEvent_t start_event;
+    cudaEvent_t stop_event;
+    cudaStream_t stream;
+    std::chrono::high_resolution_clock::time_point host_start;
+    std::string name;
+
+public:
+    GpuTimer(const std::string& operation_name = "", cudaStream_t s = 0)
+        : stream(s), name(operation_name) {
+        CUDA_CHECK(cudaEventCreate(&start_event));
+        CUDA_CHECK(cudaEventCreate(&stop_event));
+        host_start = std::chrono::high_resolution_clock::now();
+        CUDA_CHECK(cudaEventRecord(start_event, stream));
+    }
+
+    ~GpuTimer() {
+        CUDA_CHECK(cudaEventRecord(stop_event, stream));
+        CUDA_CHECK(cudaEventSynchronize(stop_event));
+        auto host_end = std::chrono::high_resolution_clock::now();
+        if (!name.empty()) {
+            float gpu_ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, start_event, stop_event));
+            double wall_us =
+                std::chrono::duration<double, std::micro>(host_end - host_start).count();
+            std::cout << name << "  gpu: " << gpu_ms * 1000.0f << " us"
+                      << "  wall: " << wall_us << " us" << std::endl;
+        }
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(stop_event);
+    }
+
+    // Not copyable (events are unique resources).
+    GpuTimer(const GpuTimer&) = delete;
+    GpuTimer& operator=(const GpuTimer&) = delete;
+};
+
+/**
  * Allocate host (CPU) memory
  * @param ptr Pointer to pointer that will hold allocated memory
  * @param size Number of elements to allocate

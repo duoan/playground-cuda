@@ -82,15 +82,14 @@ int main() {
               << " threads per block" << std::endl;
     std::cout << "Total threads: " << blocksPerGrid * threadsPerBlock << std::endl;
 
-    // Run GPU version with timing
-    // Kernel launch syntax: kernel_name<<<grid_size, block_size>>>(parameters)
-    // Kernel launch is asynchronous (returns immediately)
-    // cudaDeviceSynchronize() waits for kernel completion
+    // Warmup: first launch pays JIT / context init cost.
+    vector_add_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_a, d_b, d_c, n);
+    CUDA_CHECK(cudaGetLastError());
+
     {
-        Timer gpu_timer("GPU Vector Addition");
+        GpuTimer gpu_timer("GPU Vector Addition");
         vector_add_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_a, d_b, d_c, n);
-        CUDA_CHECK(cudaDeviceSynchronize());  // Wait for kernel completion
-    }  // Timer prints elapsed time here
+    }
 
     // Copy result back from device to host
     // Synchronous operation: blocks until copy completes

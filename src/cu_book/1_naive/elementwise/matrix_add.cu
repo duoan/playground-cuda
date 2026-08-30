@@ -110,33 +110,14 @@ int main() {
               << blocksPerGrid.x * blocksPerGrid.y * threadsPerBlock.x * threadsPerBlock.y
               << std::endl;
 
-    // Time the kernel itself with cudaEvent (GPU clock, ~0.5us precision).
-    // Host-side chrono timers include launch overhead / sync latency and only
-    // give ms granularity, which is useless for a ~10us kernel.
-    cudaEvent_t k_start, k_stop;
-    CUDA_CHECK(cudaEventCreate(&k_start));
-    CUDA_CHECK(cudaEventCreate(&k_stop));
-
-    // Warmup launch: first launch pays JIT / context init cost.
+    // Warmup: first launch pays JIT / context init cost.
     matrix_add_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, num_rows, num_cols);
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaEventRecord(k_start));
-    matrix_add_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, num_rows, num_cols);
-    CUDA_CHECK(cudaEventRecord(k_stop));
-    CUDA_CHECK(cudaEventSynchronize(k_stop));
-
-    float kernel_ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&kernel_ms, k_start, k_stop));
-
-    // Effective DRAM bandwidth: 3 arrays touched (2 reads + 1 write).
-    double bytes = 3.0 * n * sizeof(float);
-    double gbps = bytes / (kernel_ms * 1e-3) / 1e9;
-    std::cout << "GPU kernel time: " << kernel_ms * 1000.0 << " us"
-              << ", effective bandwidth: " << gbps << " GB/s" << std::endl;
-
-    CUDA_CHECK(cudaEventDestroy(k_start));
-    CUDA_CHECK(cudaEventDestroy(k_stop));
+    {
+        GpuTimer gpu_timer("GPU Matrix Addition");
+        matrix_add_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, num_rows, num_cols);
+    }
 
     // Copy result back from device to host
     // Synchronous operation: blocks until copy completes
