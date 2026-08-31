@@ -114,6 +114,8 @@ void load_labels(const char* filename, int* labels, int size) {
  */
 void initialize_weights(float* weights, int input_size, int output_size) {
     float scale = sqrtf(6.0f / input_size);
+    // NOTE: not parallelized. rand() is not thread-safe and we want
+    // deterministic weights (same srand seed -> same weights across runs).
     for (int i = 0; i < input_size * output_size; i++) {
         weights[i] = ((float)rand() / RAND_MAX) * 2.0f * scale - scale;
     }
@@ -151,20 +153,17 @@ void normalize_data(float* data, int size) {
  * @param size Size of each sample (number of classes)
  */
 void softmax(float* x, int batch_size, int size) {
-    // Process each sample in the batch
+#pragma omp parallel for
     for (int b = 0; b < batch_size; b++) {
-        // Step 1: Find maximum value for numerical stability
         float x_max = x[b * size];
         for (int i = 1; i < size; i++) {
             x_max = fmaxf(x_max, x[b * size + i]);
         }
-        // Step 2: Compute exponentials and sum
         float exp_sum = 0.0f;
         for (int i = 0; i < size; i++) {
             x[b * size + i] = expf(x[b * size + i] - x_max);
             exp_sum += x[b * size + i];
         }
-        // Step 3: Normalize to get probabilities
         for (int i = 0; i < size; i++) {
             x[b * size + i] = fmaxf(x[b * size + i] / exp_sum, 1e-7f);
         }
@@ -181,12 +180,14 @@ void softmax(float* x, int batch_size, int size) {
  * @param k Number of columns in B and C
  */
 void matmul_a_b(float* A, float* B, float* C, int m, int n, int k) {
+#pragma omp parallel for collapse(2)
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < k; j++) {
-            C[i * k + j] = 0.0f;
+            float acc = 0.0f;
             for (int l = 0; l < n; l++) {
-                C[i * k + j] += A[i * n + l] * B[l * k + j];
+                acc += A[i * n + l] * B[l * k + j];
             }
+            C[i * k + j] = acc;
         }
     }
 }
@@ -202,12 +203,14 @@ void matmul_a_b(float* A, float* B, float* C, int m, int n, int k) {
  * @param k Number of rows in B and columns in C
  */
 void matmul_a_bt(float* A, float* B, float* C, int m, int n, int k) {
+#pragma omp parallel for collapse(2)
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < k; j++) {
-            C[i * k + j] = 0.0f;
+            float acc = 0.0f;
             for (int l = 0; l < n; l++) {
-                C[i * k + j] += A[i * n + l] * B[j * n + l];
+                acc += A[i * n + l] * B[j * n + l];
             }
+            C[i * k + j] = acc;
         }
     }
 }
@@ -223,12 +226,14 @@ void matmul_a_bt(float* A, float* B, float* C, int m, int n, int k) {
  * @param k Number of columns in B and C
  */
 void matmul_at_b(float* A, float* B, float* C, int m, int n, int k) {
+#pragma omp parallel for collapse(2)
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < k; j++) {
-            C[i * k + j] = 0.0f;
+            float acc = 0.0f;
             for (int l = 0; l < m; l++) {
-                C[i * k + j] += A[l * n + i] * B[l * k + j];
+                acc += A[l * n + i] * B[l * k + j];
             }
+            C[i * k + j] = acc;
         }
     }
 }
@@ -239,6 +244,7 @@ void matmul_at_b(float* A, float* B, float* C, int m, int n, int k) {
  * @param size Number of elements
  */
 void relu_forward(float* x, int size) {
+#pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] = fmaxf(0.0f, x[i]);
     }
@@ -252,6 +258,7 @@ void relu_forward(float* x, int size) {
  * @param size Size of each sample
  */
 void bias_forward(float* x, float* bias, int batch_size, int size) {
+#pragma omp parallel for collapse(2)
     for (int b = 0; b < batch_size; b++) {
         for (int i = 0; i < size; i++) {
             x[b * size + i] += bias[i];

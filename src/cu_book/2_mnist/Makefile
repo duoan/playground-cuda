@@ -8,9 +8,9 @@ CC         ?= gcc
 
 OUT_DIR     = out
 
-CFLAGS     ?= -O2 -std=c11 -Wall -Wextra -D_POSIX_C_SOURCE=200809L
+CFLAGS     ?= -O2 -std=c11 -Wall -Wextra -D_POSIX_C_SOURCE=200809L -fopenmp
 NVCCFLAGS  ?= -O2 -std=c++17
-LDLIBS     ?= -lm
+LDLIBS     ?= -lm -fopenmp
 
 C_SRCS     := $(wildcard v*.c)
 CU_SRCS    := $(wildcard v*.cu)
