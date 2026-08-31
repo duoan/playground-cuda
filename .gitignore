@@ -14,3 +14,4 @@ __pycache__/
 *.ncu-rep
 *.egg-info
 traces/
+src/cu_book/*/data/
