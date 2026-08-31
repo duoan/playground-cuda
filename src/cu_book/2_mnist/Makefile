@@ -9,11 +9,11 @@ CC         ?= gcc
 OUT_DIR     = out
 
 CFLAGS     ?= -O2 -std=c11 -Wall -Wextra -D_POSIX_C_SOURCE=200809L -fopenmp
-NVCCFLAGS  ?= -O2 -std=c++17
+NVCCFLAGS  ?= -O2 -std=c++17 -Xcompiler=-fopenmp
 LDLIBS     ?= -lm -fopenmp
 
-C_SRCS     := $(wildcard v*.c)
-CU_SRCS    := $(wildcard v*.cu)
+C_SRCS     := $(wildcard *.c)
+CU_SRCS    := $(wildcard *.cu)
 C_BINS     := $(patsubst %.c,$(OUT_DIR)/%,$(C_SRCS))
 CU_BINS    := $(patsubst %.cu,$(OUT_DIR)/%,$(CU_SRCS))
 TARGETS    := $(C_BINS) $(CU_BINS)
@@ -35,7 +35,7 @@ $(OUT_DIR)/%: %.c | $(OUT_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(LDLIBS)
 
 $(OUT_DIR)/%: %.cu | $(OUT_DIR)
-	$(NVCC) $(NVCCFLAGS) $< -o $@
+	$(NVCC) $(NVCCFLAGS) $< -o $@ -lgomp -lcublas
 
 run: all
 	@if [ -z "$(APP)" ]; then echo "Usage: make run APP=<name>  (e.g. make run APP=v3)"; exit 1; fi
