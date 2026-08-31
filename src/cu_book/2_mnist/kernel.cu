@@ -180,3 +180,55 @@ __global__ void bias_forward_kernel(
         Y[row * hidden_dim + col] = X[row * hidden_dim + col] + bias[col];
     }
 }
+
+/**
+ * grad_bias = sum over batch of grad_output    (backward of bias_forward)
+ *
+ * Shapes (all row-major, contiguous):
+ *   grad_output [batch_size, hidden_dim]   upstream gradient at this layer's output
+ *   grad_bias   [hidden_dim]               gradient wrt bias
+ *
+ * Formula:  grad_bias[col] = sum_{b in [0, batch_size)} grad_output[b][col]
+ *
+ * Why sum over batch:
+ *   Forward is  Y[b][col] = X[b][col] + bias[col],  so
+ *   dL/dbias[col] = sum_b (dL/dY[b][col]) * (dY[b][col]/dbias[col])
+ *                 = sum_b  grad_output[b][col] * 1
+ *   The batch dim is what gets reduced because the same bias vector was
+ *   broadcast over the batch in forward.
+ *
+ * Grid convention: 1D grid over the hidden_dim output. One thread per bias
+ * element. Each thread does an independent serial reduction along batch.
+ *   threadIdx.x -> col
+ *
+ * Typical launch:
+ *   int block = 256;
+ *   int grid  = (hidden_dim + block - 1) / block;
+ *   bias_backward_kernel<<<grid, block>>>(grad_output, grad_bias, batch_size, hidden_dim);
+ *
+ * Coalescing:
+ *   For a fixed b, the 32 threads of a warp read
+ *     grad_output[b * hidden_dim + 0], [+ 1], ..., [+ 31]
+ *   -- 32 contiguous floats, one 128B transaction. Ideal.
+ *
+ * Note: with tiny batch (e.g. 8) the serial reduction is cheap and this kernel
+ * is fine. For large batch, a tree/warp-shuffle reduction can help, but that's
+ * only worth it once bias-backward shows up in the profile.
+ */
+__global__ void bias_backward_kernel(
+    const float* __restrict__ grad_output,  // input,  [batch_size, hidden_dim]
+    float* __restrict__ grad_bias,          // output, [hidden_dim]
+    const int batch_size,                   // rows of grad_output (reduction axis)
+    const int hidden_dim                    // cols of grad_output, length of grad_bias
+) {
+    int col = blockDim.x * blockIdx.x + threadIdx.x;
+    if (col < hidden_dim) {
+        float acc = 0.0f;
+        for (int b = 0; b < batch_size; ++b) {
+            acc += grad_output[b * hidden_dim + col];
+        }
+        grad_bias[col] = acc;
+    }
+}
+
+
