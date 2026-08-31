@@ -231,4 +231,114 @@ __global__ void bias_backward_kernel(
     }
 }
 
+/**
+ * x = max(x, 0)     (ReLU forward, in-place)
+ *
+ * Element-wise, no cross-thread dependency. Modifies x in place; no separate
+ * output buffer needed. Shape of x is anything flattened -- caller passes the
+ * total element count.
+ *
+ * Formula:  x[i] = max(x[i], 0)
+ *
+ * Grid convention: 1D grid over the flat element count. One thread per element.
+ *   threadIdx.x -> flat index
+ *
+ * Typical launch:
+ *   int block = 256;
+ *   int grid  = (size + block - 1) / block;
+ *   relu_forward_kernel<<<grid, block>>>(x, size);
+ *
+ * Note: memory-bound (1 load + 1 store per element, one FMA-cheap op). Usually
+ * fused into the preceding matmul + bias (see matmul_bias_relu_forward_kernel).
+ */
+__global__ void relu_forward_kernel(float* x, const int size) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx < size) {
+        x[idx] = fmaxf(0.0f, x[idx]);
+    }
+}
 
+/**
+ * grad *= (x > 0)     (ReLU backward, in-place mask on grad)
+ *
+ * Forward was  y = max(x, 0),  so
+ *   dy/dx = 1  if pre-activation > 0,  else 0
+ * We accept the ReLU output (post-activation) as `x` here, which works because
+ * for ReLU  (x > 0)  is equivalent to  (pre > 0)  -- positive values pass
+ * through unchanged, non-positive values become 0.
+ *
+ * Formula:  grad[i] = grad[i] * (x[i] > 0 ? 1 : 0)
+ *
+ * Grid convention: 1D grid over the flat element count. One thread per element.
+ *   threadIdx.x -> flat index
+ *
+ * Typical launch:
+ *   int block = 256;
+ *   int grid  = (size + block - 1) / block;
+ *   relu_backward_kernel<<<grid, block>>>(grad, x, size);
+ *
+ * `grad` is modified in place -- callers should not assume it survives.
+ */
+__global__ void relu_backward_kernel(float* grad, const float* __restrict__ x, const int size) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx < size) {
+        grad[idx] *= (x[idx] > 0.0f ? 1.0f : 0.0f);
+    }
+}
+
+/**
+ * Row-wise softmax (in-place), with a numerical-stability shift by row max
+ * and a small floor to avoid log(0) in the downstream cross-entropy.
+ *
+ * Shape (row-major, contiguous):
+ *   x [batch_size, hidden_dim]   softmax computed independently per row
+ *
+ * Formula (per row b):
+ *   m       = max_j x[b][j]
+ *   e[b][j] = exp(x[b][j] - m)
+ *   s       = sum_j e[b][j]
+ *   x[b][j] = max(e[b][j] / s, 1e-7)     -- floor keeps log() safe in CE
+ *
+ * Grid convention: 1 block = 1 row, 1 thread per block. Each row is reduced
+ * serially by a single thread (3 passes over the row).
+ *   blockIdx.x -> row
+ *
+ * Typical launch:
+ *   softmax_kernel<<<batch_size, 1>>>(x, batch_size, hidden_dim);
+ *
+ * Performance note:
+ *   1 thread / block is *very* under-utilized -- a warp is 32 threads, so 31
+ *   lanes sit idle, and the row loop is fully serial. For batch_size = 8 you
+ *   only occupy 8 warps out of hundreds available on the GPU. Fine for a
+ *   naive baseline; the standard optimization is 1 block per row with
+ *   `hidden_dim` threads doing a warp-shuffle reduction for max/sum. Swap
+ *   in later if this kernel shows up in profiling.
+ *
+ * Correctness note:
+ *   The max-finding loop redundantly compares x[b][0] against itself once
+ *   (harmless, fmaxf(a, a) == a). Could start at col = 1 to save one op.
+ */
+__global__ void softmax_kernel(float* x, const int batch_size, const int hidden_dim) {
+    int row = blockIdx.x;
+    if (row < batch_size) {
+        // 1. Row max for numerical stability.
+        float x_max = x[row * hidden_dim];
+        for (int col = 0; col < hidden_dim; ++col) {
+            x_max = fmaxf(x_max, x[row * hidden_dim + col]);
+        }
+
+        // 2. Exponentiate the shifted values and accumulate the sum.
+        float exp_sum = 0.0f;
+        for (int col = 0; col < hidden_dim; ++col) {
+            int idx = row * hidden_dim + col;
+            x[idx] = expf(x[idx] - x_max);
+            exp_sum += x[idx];
+        }
+
+        // 3. Normalize; floor at 1e-7 so downstream log() is safe.
+        for (int col = 0; col < hidden_dim; ++col) {
+            int idx = row * hidden_dim + col;
+            x[idx] = fmaxf(x[idx] / exp_sum, 1e-7f);
+        }
+    }
+}
