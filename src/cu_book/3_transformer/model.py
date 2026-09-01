@@ -38,32 +38,37 @@ def sdpa(
 
 class MultiHeadAttention(nn.Module):
     def __init__(
-        self, hidden_dim: int, n_heads: int, *args: Any, **kwargs: Any
+        self,
+        hidden_size: int,
+        num_attention_heads: int,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self.n_heads = n_heads
-        self.head_dim = hidden_dim // n_heads
+        self.num_attention_heads = num_attention_heads
+        self.head_dim = hidden_size // num_attention_heads
 
         self.qkv_proj = nn.Linear(
-            in_features=hidden_dim,
-            out_features=3 * hidden_dim,
+            in_features=hidden_size,
+            out_features=3 * hidden_size,
             bias=False,
         )
 
         self.out_proj = nn.Linear(
-            in_features=hidden_dim,
-            out_features=hidden_dim,
+            in_features=hidden_size,
+            out_features=hidden_size,
             bias=False,
         )
 
-    def forward(self, x: Float[Tensor, "b t c"]) -> Float[Tensor, "b t c"]:
-        # 1. qkv projection and split heads
+    def forward(self, x: Float[Tensor, "b s d"]) -> Float[Tensor, "b s d"]:
+        # 1. qkv projection, then split heads
+        qkv = self.qkv_proj(x)  # [b, t, 3 * hidden_size]
         q, k, v = rearrange(
-            x,
-            "b t (three h d) -> three b h t d",
+            qkv,
+            "b s (three h d) -> three b h s d",
             three=3,
-            h=self.n_heads,
+            h=self.num_attention_heads,
             d=self.head_dim,
         )
 
@@ -117,6 +122,7 @@ class GroupQueryAttention(nn.Module):
         self.o_proj = nn.Linear(
             num_attention_heads * self.head_dim, hidden_size, bias=False
         )
+
         self.max_seq_len = max_seq_len
         mask = torch.triu(
             torch.ones((max_seq_len, max_seq_len), dtype=torch.bool),
@@ -130,8 +136,8 @@ class GroupQueryAttention(nn.Module):
         kv_cache: KVCache | None = None,
     ) -> Float[Tensor, "B S D"]:
         q_seq_len = hidden_states.size(1)
-        assert q_seq_len < self.max_seq_len, (
-            f"Only support sequence length < {self.max_seq_len} "
+        assert q_seq_len <= self.max_seq_len, (
+            f"Only support sequence length <= {self.max_seq_len} "
         )
 
         # Q, K, V projection, split heads and reshape
@@ -154,7 +160,7 @@ class GroupQueryAttention(nn.Module):
         )
 
         # 2. match KV heads to Q heads using repeat_interleave
-        # from (B, num_key_value_heads, S, head_dim) -> To: (B, num_attention_heads, S, head_dim)
+        # from (B, num_key_value_heads, S, head_dim) -> (B, num_attention_heads, S, head_dim)
         k_states = torch.repeat_interleave(
             k_states, repeats=self.num_key_value_groups, dim=1
         )
@@ -177,19 +183,27 @@ class GroupQueryAttention(nn.Module):
         attn_out = einsum(
             attn_weights,
             v_states,
-            "b n s_q s_kv, b n s_kv h -> b s_q (n h)",
+            "b n s_q s_kv, b n s_kv h -> b n s_q h",
         )
+        # merge heads: [b, n, s_q, h] -> [b, s_q, n * h]
+        attn_out = rearrange(attn_out, "b n s_q h -> b s_q (n h)")
 
         # 4. out projection
         return self.o_proj(attn_out)
 
 
 class FeedForward(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        hidden_dim: int,
+        intermediate_dim: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        self.gate_proj = nn.Linear(d_model, d_ff, bias=False)
-        self.up_proj = nn.Linear(d_model, d_ff, bias=False)
-        self.down_proj = nn.Linear(d_ff, d_model, bias=False)
+        self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
 
     def forward(self, x):
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -200,17 +214,18 @@ class MoE(nn.Module):
     Sparse Mixture-of-Experts feed-forward layer.
 
     Idea:
-      Replace a single big FFN by `n_experts` smaller FFNs. For each token,
-      route it to the top-K experts (K << n_experts), and combine only those
-      experts' outputs weighted by the gate probabilities. Total parameters
-      scale with n_experts, but per-token FLOPs stay ~ K * (one expert).
+      Replace a single big FFN by `num_local_experts` smaller FFNs. For each
+      token, route it to the top-K experts (K << num_local_experts), and
+      combine only those experts' outputs weighted by the gate probabilities.
+      Total parameters scale with num_local_experts, but per-token FLOPs
+      stay ~ K * (one expert).
 
     Shape symbols used below:
       B = batch size
       S = sequence length
-      D = d_model (feature dim)
-      E = n_experts
-      K = n_experts_top_k        # experts activated per token
+      D = hidden_size (feature dim)
+      E = num_local_experts
+      K = num_experts_per_tok        # experts activated per token
 
     Auxiliary load-balancing loss (returned alongside y):
       Without a balancing signal the gate tends to collapse: it may route
@@ -221,159 +236,166 @@ class MoE(nn.Module):
 
     def __init__(
         self,
-        d_model: int,
-        d_ff: int,
-        n_experts: int,
-        n_experts_top_k: int,
+        hidden_dim: int,
+        intermediate_dim: int,
+        num_local_experts: int,
+        num_experts_per_token: int,
         *args: Any,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.n_experts = n_experts
-        self.n_experts_top_k = n_experts_top_k
+        self.num_local_experts = num_local_experts
+        self.num_experts_per_token = num_experts_per_token
 
         # Gate (a.k.a. router): produces one logit per expert for every token.
         # This is the only learnable part of the routing decision.
-        self.gate = nn.Linear(d_model, n_experts)
+        self.router = nn.Linear(hidden_dim, num_local_experts)
 
         # Experts: each is a full FFN with the same architecture as the dense
         # case. They do NOT share weights.
         self.experts = nn.ModuleList(
-            [FeedForward(d_model, d_ff) for _ in range(n_experts)]
+            [
+                FeedForward(hidden_dim, intermediate_dim)
+                for _ in range(num_local_experts)
+            ]
         )
 
     def forward(self, x: Float[Tensor, "B S D"]):
-        B, S, _ = x.shape
-        num_tokens = B * S  # total tokens across the batch
+        # Flatten to per-token rows. MoE is a purely token-level op:
+        # batch/seq have no semantics for routing, so we merge them.
+        # T = B * S = total tokens.
+        B, S, D = x.shape
+        x_flat = x.reshape(-1, D)  # [T, D]
 
-        # ---------------- 1. Gating ----------------
-        # One logit per (token, expert) pair.
-        gate_logits = self.gate(x)  # [B, S, E]
+        router_topk_indices, router_topk_weights, router_probs = self._route(x_flat)
+        y_flat = self._dispatch(x_flat, router_topk_indices, router_topk_weights)
+        aux_loss = self._aux_loss(router_topk_indices, router_probs)
 
-        # Full softmax over experts. Used ONLY for the aux loss below.
-        # Kept differentiable end-to-end so aux loss actually trains the gate.
-        gate_probs = F.softmax(gate_logits, dim=-1)  # [B, S, E]
+        y = y_flat.reshape(B, S, D)  # restore original shape
+        return y, aux_loss
 
-        # Pick the K best experts per token by raw logit.
-        #   topk_logits:  the K largest logits per token
-        #   topk_indices: which experts those K logits belong to, in [0, E)
-        # Note: torch.topk returns distinct indices, so a token never picks
-        # the same expert twice -- this is what makes the mask trick below
-        # safe (see routing loop).
-        topk_logits, topk_indices = torch.topk(
-            gate_logits, k=self.n_experts_top_k, dim=-1
-        )  # both [B, S, K]
+    def _route(self, x: Float[Tensor, "T D"]):
+        """Score every (token, expert) pair, pick top-K, normalize the K weights.
 
-        # Re-normalize among the K chosen experts, so the K weights sum to 1
-        # per token. This is standard MoE (Switch / GShard / Mixtral style):
-        # we don't reuse the full-E softmax weights, only the K selected ones.
-        topk_weights = F.softmax(topk_logits, dim=-1)  # [B, S, K]
+        Returns
+            router_topk_indices: [T, K]  which experts each token picked, in [0, E)
+            router_topk_weights: [T, K]  weights over the K picks, sum to 1
+            router_probs:        [T, E]  full softmax, kept for aux loss (differentiable)
+        """
+        router_logits = self.router(x)  # [T, E]
+        router_probs = F.softmax(router_logits, dim=-1)  # [T, E]
 
-        # ---------------- 2. Dispatch to experts ----------------
-        # Output accumulator, same shape as input.
-        y = torch.zeros_like(x)  # [B, S, D]
+        # topk over raw logits (equivalent to topk-of-softmax, cheaper).
+        # topk returns distinct indices, so no token picks an expert twice --
+        # this makes the mask trick in _dispatch safe.
+        router_topk_logits, router_topk_indices = torch.topk(
+            router_logits, k=self.num_experts_per_token, dim=-1
+        )  # both [T, K]
 
-        # Loop over experts. For each expert i we gather all tokens routed to
-        # it, run them through, and scatter the weighted result back into y.
-        # This is O(E) Python-level launches -- easy to read, not the fastest.
-        # (Grouped-matmul / megablocks style implementations avoid this loop.)
+        # Softmax over the K chosen experts so weights sum to 1 per token
+        # (Switch / GShard / Mixtral style renormalization).
+        router_topk_weights = F.softmax(router_topk_logits, dim=-1)  # [T, K]
+
+        return router_topk_indices, router_topk_weights, router_probs
+
+    def _dispatch(
+        self,
+        x: Float[Tensor, "T D"],
+        router_topk_indices: Tensor,  # [T, K]
+        router_topk_weights: Tensor,  # [T, K]
+    ) -> Tensor:
+        """For each expert, gather its tokens, run them, scatter weighted output.
+
+        O(E) Python-level launches -- readable, not the fastest. Grouped-matmul
+        (megablocks) fuses this into a single kernel.
+        """
+        y = torch.zeros_like(x)  # [T, D]
+
         for i, expert in enumerate(self.experts):
-            # Which (token, slot) positions selected expert i?
-            expert_slot_mask = topk_indices == i  # [B, S, K] bool
-
-            # Which tokens have any slot pointing at expert i?
-            # Since topk_indices has no duplicates per token, at most one of
-            # the K slots per token is True in expert_slot_mask, so
-            #   token_mask.sum() == expert_slot_mask.sum()
-            # -- this equality is what makes the += broadcast below shape-correct.
-            token_mask = expert_slot_mask.any(dim=-1)  # [B, S] bool
-
-            # No tokens picked this expert this step. Skip it (also avoids a
-            # zero-batch forward, which some layers dislike).
+            # (token, slot) positions that picked expert i, and the tokens
+            # covered by any of those slots. Since topk indices are distinct
+            # per token, at most one slot per token is True, so
+            #   token_mask.sum() == expert_slot_mask.sum() = N.
+            expert_slot_mask = router_topk_indices == i  # [T, K] bool
+            token_mask = expert_slot_mask.any(dim=-1)  # [T]    bool
             if not token_mask.any():
                 continue
 
-            # Advanced indexing:
-            #   topk_weights[expert_slot_mask]  -> [N] 1-D, where
-            #   N = expert_slot_mask.sum() = number of tokens routed to expert i.
-            # Unsqueeze to [N, 1] so it broadcasts against the [N, D] expert output.
-            expert_weight = topk_weights[expert_slot_mask].unsqueeze(-1)
-
-            # Gather the input rows for tokens going to expert i:
-            #   x[token_mask]      shape [N, D]
-            # Run the expert:
-            #   expert(x[token_mask])  shape [N, D]
-            # Weight and scatter-add into y at the same positions:
-            #   y[token_mask]       shape [N, D]
+            # Advanced indexing: mask -> [N, ...] flat rows.
+            #   x[token_mask]                         -> [N, D]
+            #   router_topk_weights[expert_slot_mask] -> [N]   (one weight per routed token)
+            expert_weight = router_topk_weights[expert_slot_mask].unsqueeze(-1)  # [N, 1]
             y[token_mask] += expert(x[token_mask]) * expert_weight
 
-        # ---------------- 3. Auxiliary load-balancing loss ----------------
-        # Motivation: encourage every expert to see ~1/E of the tokens.
-        # We combine two per-expert statistics, both compared against uniform:
-        #
-        #   (a) prob_fraction[i] = mean over tokens of gate_probs[..., i].
-        #       "How much probability mass, on average, does the gate assign
-        #        to expert i?"  --  DIFFERENTIABLE (comes from gate_probs).
-        #
-        #   (b) hard_fraction[i] = fraction of top-K slots that landed on i.
-        #       "How often was expert i actually picked?"
-        #       NOT differentiable (topk / bincount are discrete), so this
-        #       term is a constant wrt gate parameters -- it shows up in the
-        #       reported loss value but produces no gradient. It is kept as
-        #       an observable, not a training signal.
-        #
-        # The gate is actually shaped by (a). If you want the classic
-        # Switch-Transformer aux ( E * sum_i f_i * P_i ), it plugs f_i and
-        # P_i together so the differentiable P_i carries the discrete f_i's
-        # signal into the gradient -- this file uses a simpler MSE variant.
+        return y
+
+    def _aux_loss(
+        self,
+        router_topk_indices: Tensor,  # [T, K]
+        router_probs: Tensor,  # [T, E]
+    ) -> Tensor:
+        """Load-balancing loss: push both hard-count and soft-prob per expert to 1/E.
+
+        Two per-expert statistics, both compared against uniform:
+          prob_fraction[i] = mean_t router_probs[t, i]  -- DIFFERENTIABLE, trains the router
+          hard_fraction[i] = frac of top-K slots on i   -- NOT differentiable (observable)
+
+        Only the prob term produces gradient; the hard term is a monitored value
+        that shows up in the loss but has no grad w.r.t. router params.
+        (Classic Switch aux `E * sum_i f_i * P_i` couples the two so hard counts
+        also shape the gradient -- this file uses a simpler MSE-to-uniform variant.)
+        """
+        E = self.num_local_experts
+        num_slots = router_topk_indices.numel()  # T * K
+
         with torch.no_grad():
-            # Flatten [B, S, K] -> [B*S*K] indices, count occurrences per expert.
             hard_counts = torch.bincount(
-                topk_indices.reshape(-1),
-                minlength=self.n_experts,
+                router_topk_indices.reshape(-1), minlength=E
             ).float()  # [E]
-            # Normalize: total slots dispatched = num_tokens * K.
-            hard_fraction = hard_counts / (num_tokens * self.n_experts_top_k)  # [E]
+            hard_fraction = hard_counts / num_slots  # [E]
 
-        # Average gate probability per expert across all tokens.
-        prob_fraction = gate_probs.mean(dim=(0, 1))  # [E]
+        prob_fraction = router_probs.mean(dim=0)  # [E]
+        uniform = torch.full_like(prob_fraction, 1.0 / E)  # [E]
 
-        # Target: perfectly uniform routing.
-        uniform = torch.full_like(prob_fraction, 1.0 / self.n_experts)  # [E]
-
-        aux_loss = F.mse_loss(prob_fraction, uniform) + F.mse_loss(
-            hard_fraction, uniform
-        )
-
-        return y, aux_loss
+        return F.mse_loss(prob_fraction, uniform) + F.mse_loss(hard_fraction, uniform)
 
 
 class TransformerBlock(nn.Module):
     def __init__(
         self,
-        d_model: int,
-        d_ff: int,
-        n_attention_heads: int,
-        n_key_value_heads: int,
-        n_experts: int = 0,
-        n_experts_top_k: int = 1,
+        hidden_size: int,
+        intermediate_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        num_local_experts: int = 0,
+        num_experts_per_tok: int = 1,
         parallel: bool = False,
         *args: Any,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.parallel = parallel
-        self.use_moe = n_experts > 0
+        self.use_moe = num_local_experts > 0
         self.ffn = (
-            MoE(d_model, d_ff, n_experts, n_experts_top_k)
+            MoE(hidden_size, intermediate_size, num_local_experts, num_experts_per_tok)
             if self.use_moe
-            else FeedForward(d_model, d_ff)
+            else FeedForward(hidden_size, intermediate_size)
         )
-        self.input_layernorm = nn.RMSNorm(normalized_shape=d_model)
-        self.post_attention_layernorm = nn.RMSNorm(normalized_shape=d_model)
+        self.input_layernorm = nn.RMSNorm(normalized_shape=hidden_size)
+        self.post_attention_layernorm = nn.RMSNorm(normalized_shape=hidden_size)
         self.self_attn = GroupQueryAttention(
-            d_model, n_attention_heads, n_key_value_heads
+            hidden_size, num_attention_heads, num_key_value_heads
         )
+
+    def _run_ffn(self, x: Tensor) -> Tensor:
+        """Call the FFN, unpack the MoE tuple, stash aux_loss for read-out."""
+        if self.use_moe:
+            y, aux_loss = self.ffn(x)
+            self.aux_loss = aux_loss  # last-forward aux loss; caller reads and clears
+        else:
+            y = self.ffn(x)
+            self.aux_loss = None
+        return y
 
     def forward(self, hidden_states: Tensor) -> Tensor:
         residual = hidden_states
@@ -381,9 +403,8 @@ class TransformerBlock(nn.Module):
         if self.parallel:
             hidden_states = self.input_layernorm(hidden_states)
             attn_output = self.self_attn(hidden_states)
-            ffn_output = self.ffn(hidden_states)
-            hidden_states = residual + attn_output + ffn_output
-            return hidden_states
+            ffn_output = self._run_ffn(hidden_states)
+            return residual + attn_output + ffn_output
         else:
             hidden_states = self.input_layernorm(hidden_states)
             # self attention
@@ -393,6 +414,6 @@ class TransformerBlock(nn.Module):
             # feedforward
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
-            ffn_output = self.ffn(hidden_states)
+            ffn_output = self._run_ffn(hidden_states)
 
             return residual + ffn_output
