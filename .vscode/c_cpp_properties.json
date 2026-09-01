@@ -10,7 +10,11 @@
       "includePath": [
         "${workspaceFolder}/src",
         "${workspaceFolder}/src/**",
-        "/usr/local/cuda/include"
+        "/usr/local/cuda/include",
+        "/usr/local/cuda/include/cccl",
+        "${workspaceFolder}/.venv/lib/python3.12/site-packages/torch/include",
+        "${workspaceFolder}/.venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include",
+        "${env:HOME}/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/include/python3.12"
       ],
       "defines": [
         "__CUDACC__",
