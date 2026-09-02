@@ -201,12 +201,94 @@ class FeedForward(nn.Module):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        # can fuse gate and up
         self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
         self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
         self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
 
     def forward(self, x):
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+class FusedFeedForward(nn.Module):
+    """SwiGLU FFN with gate_proj and up_proj fused into a single Linear.
+
+    Same math as `FeedForward`, but one matmul produces [..., 2*D_ff] which
+    is then chunk'd into gate | up. Saves one kernel launch and reads the
+    input activation once instead of twice (LLaMA / Mixtral / Qwen convention).
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        intermediate_dim: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.gate_up_proj = nn.Linear(hidden_dim, 2 * intermediate_dim, bias=False)
+        self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
+
+    def forward(self, x):
+        gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+        return self.down_proj(F.silu(gate) * up)
+
+
+class GroupedExperts(nn.Module):
+    """SwiGLU FFN experts with weights stacked as [E, ...] for grouped GEMM.
+
+    gate_proj and up_proj are fused into a single `gate_up_proj` of shape
+    [E, 2*D_ff, D] (LLaMA / Mixtral / Qwen-MoE convention). One grouped GEMM
+    produces [N, 2*D_ff], then `chunk(2)` splits back into gate/up. This
+      - saves one kernel launch (2 grouped GEMMs total instead of 3),
+      - reads the activation only once for both projections,
+      - lets the GEMM tile stream both halves of the weight contiguously.
+    """
+
+    def __init__(
+        self,
+        num_experts: int,
+        hidden_dim: int,
+        intermediate_dim: int,
+    ) -> None:
+        super().__init__()
+        self.num_experts = num_experts
+        self.hidden_dim = hidden_dim
+        self.intermediate_dim = intermediate_dim
+
+        # nn.Linear-style shape (out, in), stacked over experts.
+        # gate and up fused along the out dim: first D_ff rows = gate, next D_ff = up.
+        self.gate_up_proj = nn.Parameter(
+            torch.empty(num_experts, 2 * intermediate_dim, hidden_dim)
+        )
+        self.down_proj = nn.Parameter(
+            torch.empty(num_experts, hidden_dim, intermediate_dim)
+        )
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        # Match nn.Linear default init (Kaiming uniform on 2D slices).
+        for w in (self.gate_up_proj, self.down_proj):
+            for i in range(self.num_experts):
+                nn.init.kaiming_uniform_(w[i], a=math.sqrt(5))
+
+    def forward(
+        self,
+        x_permuted: Float[Tensor, "N D"],  # tokens grouped by target expert
+        offs: Tensor,  # [E]  int32, END offset per expert (torch._grouped_mm convention)
+    ) -> Tensor:
+        """Run all experts as two grouped GEMMs (fused gate/up + down)."""
+        # grouped_mm expects b as [E, K, N]; our weights are (out, in) so transpose last two dims.
+        # [N, D] @ [E, D, 2*D_ff] -> [N, 2*D_ff], split into gate | up
+        gate_up = torch._grouped_mm(  # type: ignore
+            x_permuted, self.gate_up_proj.transpose(-1, -2), offs=offs
+        )  # [N, 2*D_ff]
+        gate, up = gate_up.chunk(2, dim=-1)  # each [N, D_ff]
+        hidden = F.silu(gate) * up  # [N, D_ff]
+        out = torch._grouped_mm(  # type: ignore
+            hidden, self.down_proj.transpose(-1, -2), offs=offs
+        )  # [N, D]
+        return out
 
 
 class MoE(nn.Module):
@@ -247,23 +329,16 @@ class MoE(nn.Module):
         self.num_local_experts = num_local_experts
         self.num_experts_per_token = num_experts_per_token
 
-        # Gate (a.k.a. router): produces one logit per expert for every token.
-        # This is the only learnable part of the routing decision.
+        # Router: one logit per (token, expert). The only learnable part of routing.
         self.router = nn.Linear(hidden_dim, num_local_experts)
 
-        # Experts: each is a full FFN with the same architecture as the dense
-        # case. They do NOT share weights.
-        self.experts = nn.ModuleList(
-            [
-                FeedForward(hidden_dim, intermediate_dim)
-                for _ in range(num_local_experts)
-            ]
-        )
+        # Experts: SwiGLU FFN weights stacked as [E, ...] for grouped GEMM.
+        # Requires bf16/fp16 at forward time (torch._grouped_mm has no fp32 path).
+        self.experts = GroupedExperts(num_local_experts, hidden_dim, intermediate_dim)
 
     def forward(self, x: Float[Tensor, "B S D"]):
-        # Flatten to per-token rows. MoE is a purely token-level op:
-        # batch/seq have no semantics for routing, so we merge them.
-        # T = B * S = total tokens.
+        # MoE is a purely token-level op; batch/seq have no semantics for routing.
+        # Flatten to [T, D] (T = B*S) so everything downstream is 1D over tokens.
         B, S, D = x.shape
         x_flat = x.reshape(-1, D)  # [T, D]
 
@@ -304,29 +379,52 @@ class MoE(nn.Module):
         router_topk_indices: Tensor,  # [T, K]
         router_topk_weights: Tensor,  # [T, K]
     ) -> Tensor:
-        """For each expert, gather its tokens, run them, scatter weighted output.
+        """Permute -> grouped GEMM -> unpermute (Megatron / Tutel style).
 
-        O(E) Python-level launches -- readable, not the fastest. Grouped-matmul
-        (megablocks) fuses this into a single kernel.
+        1. permute:    sort all T*K token-slots by target expert-id so tokens
+                       going to the same expert become contiguous in memory.
+        2. compute:    one grouped GEMM kernel (torch._grouped_mm) runs all
+                       experts at once on their contiguous slices.
+        3. unpermute:  scatter results back to the original (token, slot)
+                       layout, multiply by top-K weights, sum over K.
         """
-        y = torch.zeros_like(x)  # [T, D]
+        E, K = self.num_local_experts, self.num_experts_per_token
+        T, D = x.shape
 
-        for i, expert in enumerate(self.experts):
-            # (token, slot) positions that picked expert i, and the tokens
-            # covered by any of those slots. Since topk indices are distinct
-            # per token, at most one slot per token is True, so
-            #   token_mask.sum() == expert_slot_mask.sum() = N.
-            expert_slot_mask = router_topk_indices == i  # [T, K] bool
-            token_mask = expert_slot_mask.any(dim=-1)  # [T]    bool
-            if not token_mask.any():
-                continue
+        # ---------------- 1. permute ----------------
+        # T*K "dispatch slots" total (each token contributes K).
+        flat_expert = router_topk_indices.reshape(-1)  # [T*K]  which expert per slot
+        flat_weight = router_topk_weights.reshape(-1)  # [T*K]  weight per slot
 
-            # Advanced indexing: mask -> [N, ...] flat rows.
-            #   x[token_mask]                         -> [N, D]
-            #   router_topk_weights[expert_slot_mask] -> [N]   (one weight per routed token)
-            expert_weight = router_topk_weights[expert_slot_mask].unsqueeze(-1)  # [N, 1]
-            y[token_mask] += expert(x[token_mask]) * expert_weight
+        # perm[j] = original slot index that now sits at position j after
+        # sorting by expert-id. Stable sort keeps within-expert order deterministic.
+        perm = torch.argsort(flat_expert, stable=True)  # [T*K]
+        # Inverse permutation: inv_perm[perm[j]] = j -- used by unpermute.
+        inv_perm = torch.empty_like(perm)
+        inv_perm[perm] = torch.arange(perm.numel(), device=perm.device)
 
+        # Each slot j maps to source token j // K. After sorting by expert,
+        # source_token[perm] gives the token id at each permuted position.
+        source_token = torch.arange(T, device=x.device).repeat_interleave(K)  # [T*K]
+        x_permuted = x[source_token[perm]]  # [T*K, D]  contiguous by expert
+
+        # torch._grouped_mm needs END offsets per expert as int32 on device
+        # (length E, not E+1). Avoid torch.bincount here: its output shape is
+        # data-dependent, which forces torch.compile to graph-break. scatter_add
+        # into a fixed-shape [E] buffer is equivalent and stays traceable.
+        counts = torch.zeros(E, dtype=torch.int64, device=x.device).scatter_add_(
+            0, flat_expert, torch.ones_like(flat_expert)
+        )  # [E]
+        offs = counts.cumsum(0).to(torch.int32)  # [E]
+
+        # ---------------- 2. compute ----------------
+        y_permuted = self.experts(x_permuted, offs)  # [T*K, D]
+
+        # ---------------- 3. unpermute ----------------
+        # Undo the sort, weight by top-K gate weight, sum over K slots per token.
+        y_slots = y_permuted[inv_perm]  # [T*K, D]
+        y_slots = y_slots * flat_weight.unsqueeze(-1)  # [T*K, D]
+        y = y_slots.reshape(T, K, D).sum(dim=1)  # [T, D]
         return y
 
     def _aux_loss(
@@ -349,9 +447,12 @@ class MoE(nn.Module):
         num_slots = router_topk_indices.numel()  # T * K
 
         with torch.no_grad():
-            hard_counts = torch.bincount(
-                router_topk_indices.reshape(-1), minlength=E
-            ).float()  # [E]
+            flat = router_topk_indices.reshape(-1)
+            # scatter_add into a fixed [E] buffer (torch.compile-friendly;
+            # torch.bincount has data-dependent output shape and breaks the graph).
+            hard_counts = torch.zeros(
+                E, dtype=torch.float32, device=router_topk_indices.device
+            ).scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.float32))  # [E]
             hard_fraction = hard_counts / num_slots  # [E]
 
         prob_fraction = router_probs.mean(dim=0)  # [E]

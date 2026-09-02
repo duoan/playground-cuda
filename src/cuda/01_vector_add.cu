@@ -54,10 +54,33 @@ void vector_add_cpu(
 }
 
 // grid-stride kernel:
-// 这里的重点是让一个线程不只负责一个元素，
-// 而是沿着一个固定 stride 扫过整个数组。
+// 让一个线程不只负责一个元素，而是沿着一个固定 stride 扫过整个数组。
 //
-// 这个写法很重要，因为它是 CUDA 里非常常见的基础模板。
+// 相比 naive，它的优势不是“更快”，而是把 grid 大小从数据大小里解耦出来。
+// 具体好处：
+//
+// 1. grid 大小可以和数据大小无关。
+//    naive 版本 blocks = ceil(count / 256)，count = 1e9 就要开 4M 个 block。
+//    grid-stride 版本可以按硬件规模开，例如 blocks = numSMs * blocksPerSM，
+//    刚好占满 GPU，多一个都不开。
+//    - launch 开销固定，不随数据规模爆炸。
+//    - 绕过 gridDim.x 的 2^31-1 上限，超大数组 naive 会直接崩。
+//    - 占用 (occupancy) 精确对齐硬件而不是数据。
+//
+// 2. 每个 thread 摊销一次性开销 (寄存器分配、公共地址计算、循环初始化)。
+//    对纯 vector add 帮助很小；对更复杂的 kernel 就明显。
+//
+// 3. 内存访问依然合并。关键在 stride 的方向：stride = blockDim.x * gridDim.x。
+//    第 0 轮 warp 内 32 个 thread 访问 a[0..31]，连续；
+//    第 1 轮访问 a[stride..stride+31]，还是连续。
+//    如果反过来写成 “每个 thread 处理连续 K 个元素”，warp 就跨 32*K
+//    个元素访问，反而破坏合并。
+//
+// 4. 一份代码，数据形状无关。库代码里常见，因为不知道用户会传多大数组。
+//
+// 对这个 vector add 而言，它本身是 memory-bound 且 naive 已经合并访问，
+// grid-stride 实测大概率和 naive 一样快 (甚至因为循环 overhead 略慢一点)。
+// 把它放在 ladder 第 3 步教的不是“更快”，而是“更通用的 CUDA 骨架”。
 __global__ void vector_add_grid_stride_kernel(
     const float* a,
     const float* b,
