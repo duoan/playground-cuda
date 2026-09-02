@@ -1,0 +1,26 @@
+// Main entry: `typst compile book.typ`
+
+#import "template.typ": *
+
+#show: book.with(
+  title: "CUDA Kernel 优化实战",
+  subtitle: "从 naive 到 Tensor Core / Flash-Attention",
+  author: "duo.an",
+)
+
+#include "chapters/00_preface.typ"
+#include "chapters/00b_cuda_concepts.typ"
+#include "chapters/01_vector_add.typ"
+#include "chapters/02_reduce_sum.typ"
+#include "chapters/03_softmax.typ"
+#include "chapters/04_matmul.typ"
+#include "chapters/05_layernorm.typ"
+#include "chapters/06_mlp.typ"
+#include "chapters/07_attention.typ"
+#include "chapters/08_flash_attention_v1.typ"
+#include "chapters/09_flash_attention_v2.typ"
+#include "chapters/10_flash_attention_v3.typ"
+#include "chapters/A_appendix.typ"
+#include "chapters/B_ncu_guide.typ"
+#include "chapters/C_optimization_playbook.typ"
+#include "chapters/D_interview_problems.typ"

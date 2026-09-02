@@ -12,9 +12,10 @@ namespace {
 //
 // Current ladder:
 // 1. atomic
-// 2. shared-memory tree reduction
-// 3. warp-aware reduction
-// 4. multi-elements-per-thread / hierarchical reduction
+// 2. interleaved-addressing tree reduction (naive, has warp divergence + bank conflicts)
+// 3. sequential-addressing tree reduction (fixes both)
+// 4. warp-aware reduction (shuffle)
+// 5. multi-elements-per-thread / hierarchical reduction
 
 constexpr int kThreadsPerBlock = 256;
 constexpr int kWarpSize = 32;
@@ -86,6 +87,41 @@ __global__ void reduce_sum_atomic_kernel(
 //
 // 这才是更典型的 CUDA reduction 思路:
 // 先 block 内协作，再多阶段缩小问题规模。
+
+// 第二版: interleaved-addressing tree reduction (naive)
+//
+// 这是最直觉的树形规约写法: 每一轮活跃的 thread 是 tid 满足
+// tid % (2*stride) == 0 的那些。
+//
+// 它有两个经典问题, 稍后用 ncu 定量看:
+//   (a) warp divergence: 第一轮只有偶数号 lane 干活,
+//       同一 warp 内一半 lane idle, 另一半在做加法。
+//   (b) bank conflict: shared[tid + stride] 在 stride = 1 时
+//       tid=0 读 bank 1, tid=2 读 bank 3, ..., 每个访问不同 bank
+//       (还没冲突); 但 stride = 16 时 tid=0 读 bank 16,
+//       tid=32 读 bank 0? 不, tid=32 已经越界不参加; 真正的冲突
+//       出现在 stride 变大到 stride >= 32 后 (bank id 开始 wrap
+//       around)。我们让 ncu 数据自己说话。
+__global__ void reduce_sum_interleaved_kernel(const float* input, float* block_sums, int count) {
+  extern __shared__ float shared[];
+
+  const int global_index = blockIdx.x * blockDim.x + threadIdx.x;
+  shared[threadIdx.x] = (global_index < count) ? input[global_index] : 0.0f;
+  __syncthreads();
+
+  // stride 从 1 开始翻倍: 每一轮活跃 lane 稀疏一半。
+  for (int stride = 1; stride < blockDim.x; stride *= 2) {
+    if (threadIdx.x % (2 * stride) == 0) {
+      shared[threadIdx.x] += shared[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    block_sums[blockIdx.x] = shared[0];
+  }
+}
+
 __global__ void reduce_sum_shared_kernel(
     const float* input,
     float* block_sums,
@@ -277,6 +313,15 @@ ReductionRun run_multi_stage_reduction(
   return result;
 }
 
+ReductionRun run_interleaved_reduction(const std::vector<float>& host_input) {
+  return run_multi_stage_reduction(
+      host_input,
+      [](const float* input, float* output, int count, int blocks) {
+        reduce_sum_interleaved_kernel<<<blocks, kThreadsPerBlock,
+                                        kThreadsPerBlock * sizeof(float)>>>(input, output, count);
+      });
+}
+
 ReductionRun run_shared_reduction(const std::vector<float>& host_input) {
   return run_multi_stage_reduction(
       host_input,
@@ -329,10 +374,17 @@ ReductionRun run_chunked_hierarchical_reduction(const std::vector<float>& host_i
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   // 故意不选 2 的整次幂，方便你观察:
   // 真正的 kernel 通常要处理各种“尾巴”。
-  constexpr int count = (1 << 20) + 37;
+  //
+  // 允许 `./02_reduce_sum <log2N>` 覆盖规模。bench 用 27 (~128M elements)
+  // 让数据超出 L2, 真正打到 HBM。
+  int log2n = 20;
+  if (argc >= 2) {
+    log2n = std::atoi(argv[1]);
+  }
+  const int count = (1 << log2n) + 37;
 
   std::vector<float> host_input(count);
   fill_input(host_input);
@@ -342,7 +394,11 @@ int main() {
   // 先跑最容易懂、但最不高效的 atomic 版本。
   const ReductionRun atomic_result = run_atomic_reduction(host_input);
 
-  // 再跑 shared memory 版本，理解 block 内树形规约。
+  // 再跑 interleaved-addressing 树形规约: naive 写法, 用于对比 warp
+  // divergence + bank conflict.
+  const ReductionRun interleaved_result = run_interleaved_reduction(host_input);
+
+  // 再跑 sequential-addressing shared memory 版本，理解 block 内树形规约。
   const ReductionRun shared_result = run_shared_reduction(host_input);
 
   // 最后跑 warp-aware 版本，开始接触 warp shuffle 思路。
@@ -353,11 +409,12 @@ int main() {
   const ReductionRun chunked_result = run_chunked_hierarchical_reduction(host_input);
 
   const bool atomic_ok = check_output(atomic_result.value, expected, "atomic");
+  const bool interleaved_ok = check_output(interleaved_result.value, expected, "interleaved");
   const bool shared_ok = check_output(shared_result.value, expected, "shared");
   const bool warp_ok = check_output(warp_result.value, expected, "warp");
   const bool chunked_ok = check_output(chunked_result.value, expected, "chunked");
 
-  if (!atomic_ok || !shared_ok || !warp_ok || !chunked_ok) {
+  if (!atomic_ok || !interleaved_ok || !shared_ok || !warp_ok || !chunked_ok) {
     return EXIT_FAILURE;
   }
 
@@ -370,6 +427,12 @@ int main() {
   std::cout << "  result: " << atomic_result.value << '\n';
   std::cout << "  stages: " << atomic_result.stages << '\n';
   std::cout << "  idea: all threads atomically add into one output" << '\n';
+  std::cout << '\n';
+
+  std::cout << "[interleaved-addressing tree reduction]" << '\n';
+  std::cout << "  result: " << interleaved_result.value << '\n';
+  std::cout << "  stages: " << interleaved_result.stages << '\n';
+  std::cout << "  idea: naive tree reduction with tid % (2*s) == 0 branch" << '\n';
   std::cout << '\n';
 
   std::cout << "[shared-memory reduction]" << '\n';
