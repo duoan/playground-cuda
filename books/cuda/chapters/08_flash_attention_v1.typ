@@ -539,6 +539,29 @@ const float score = dot_row_device(...) * inv_sqrt_head_dim;
   FP16/BF16 训练时 scale 常与 layer norm 输出尺度耦合——kernel 接口常暴露 `softmax_scale` 指针（含 $1/sqrt(d)$ 与可选 temperature），便于 inference KV cache 场景调 logits 温度而不重编译 kernel。
 ]
 
+=== ncu 实测（online / register 版）
+
+#ncu-snapshot(
+  version: "online (one thread per query row)",
+  size: [$N_q = 128$, $N_k = 512$, head_dim = 64],
+  rows: (
+    ("Duration",            "3 270 µs", ""),
+    ("Memory SOL",          "1.1 %",    "*极低*——one-thread-per-row 的经典病"),
+    ("Compute SOL",         "0.1 %",    ""),
+    ("Achieved Occupancy",  "1.6 %",    "grid = 4 blocks × 32 threads = 128 threads *全 GPU*"),
+    ("Grid Size",           "4",        "$N_q / 32 = 128 / 32 = 4$"),
+  ),
+)
+
+*Occupancy 1.6% + Grid Size 4* 是本章最戏剧的读数——GPU 有 108 SM，我们只用了 4 个。每个 thread 独立处理一个 query 行，把 $N_k = 512$ 个 key 逐一走完。$K/V$ 在 thread 之间*零复用*，每 thread 各读 $N_k times d = 32K$ 元素 = 128 KB。$N_q$ 个 thread 就是 $N_q times 128$ KB = 16 MB 的 HBM 重读。
+
+*说白了这不是 FlashAttention——这是"用 FlashAttention 数学 (online merge) 写的 attention"*，但缺 tile 复用。$K/V$ 每 tile 每 thread 重新去 HBM 读，完全没利用 shared memory。
+
+#verdict(
+  problem: [one-thread-per-query 的并行度太差，且 $K/V$ 没在 thread 之间复用——每 thread 都独立读一整套 $K, V$],
+  evidence: [Grid Size 4（GPU 108 SM 中只用 4 个）；Memory SOL 1.1%；Occupancy 1.6%；HBM 重读 16 MB],
+  next: [v2 (shared) 把 $Q$ / $K$ / $V$ tile 显式放进 shared memory —— 一个 block 处理一个 query row，block 内 threads 协作 load 一次 tile，然后所有算全用 smem 数据]
+)
 
 `flash_attention_v1_shared_kernel`：*一个 block 处理一个 query 行*，显式把 $Q$, $K$, $V$ tile 搬进 shared memory。
 
@@ -641,6 +664,33 @@ Launch：`<<<query_count, kSharedThreadsPerBlock>>>` = `<<<4, 8>>>`。
 *Observation*：面试说「读过 FA 源码」时，*online merge 循环*是算法核心，*性能*在 tile GEMM 与 occupancy 调参——二者不可混为一谈。本章刻意 scalar dot 以便读 merge 循环，不是 chase peak 的实现。
 
 面试说「我读过 FA 源码」时，至少应能指出：*online merge 循环*是算法核心；*性能*在 tile GEMM 与 occupancy 调参——二者不可混为一谈。
+
+=== ncu 实测（shared 版）
+
+#ncu-snapshot(
+  version: "shared (tile in smem, one block per query row)",
+  size: [$N_q = 128$, $N_k = 512$, head_dim = 64],
+  rows: (
+    ("Duration",            "595.6 µs", "*比 online 版快 5.5×*"),
+    ("Memory SOL",          "26.2 %",   "从 1.1% → 26.2%，HBM 利用率大幅拉高"),
+    ("Compute SOL",         "9.1 %",    ""),
+    ("L2 Hit Rate",         "93.2 %",   ""),
+    ("Achieved Occupancy",  "4.5 %",    "*↑ 从 1.6%*，但仍然低——单 block 单 row 限制"),
+    ("Grid Size",           "128",      "$N_q$ block，每 block 处理一行 query"),
+    ("Static SMEM / block", "~5 KB",    "$Q$ tile + $K$ tile + $V$ tile + scores"),
+  ),
+)
+
+- *5.5× 提速*来自两个来源：(a) block 内 threads 协作 load 一次 tile 到 smem，$K/V$ 不再每 thread 重读；(b) Grid Size 4 → 128 让 GPU 用得更满。
+- *但 memSOL 26% 仍然低*。原因：
+  - `kSharedThreadsPerBlock = 8`（教学值）—— 每 block 只有 8 threads 协作，warp 都填不满。
+  - 内层 tile matmul 由 thread 0 串行执行（"illustrate SRAM reuse, not compute perf"）—— 只有 1/8 的 lane 在算 dot product。
+- 这就是"教学 kernel 展示机制、不 chase peak" 的直接体现。生产 FA v1 会用 $B_r = 32$ or 64、$B_c = 32$、每 block $>= 128$ threads，warp-per-row + Tensor Core。
+
+#final-verdict(
+  status: [FA v1 shared 版本已经把 online softmax 的核心机制（tile matmul + running max/sum merge + $O$ 重标定）落地，$S$ 从不落 HBM。],
+  note: [继续接近生产 FA 需要 (1) 多 warp 协作代替单 thread 串行 dot，(2) `cp.async` 让 $K/V$ 下一 tile 预取和当前 tile compute overlap，(3) Tensor Core (`mma.sync`) 让 dot product 用 FP16/BF16 半精度 8-16× 加速。这些进一步优化在 09、10 章展开。]
+)
 
 == Multi-Head 与 Batch 扩展
 

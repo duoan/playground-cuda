@@ -189,6 +189,34 @@ Kernel 3 (linear2):  读 H_post, W2, b2  →  写 Y
   naive 的价值：建立正确性。CPU reference 和三个 kernel 结果必须 bit-exact（源码 `check_output` 容差 $10^(-4)$）。优化 ladder 的每一步都在保持这个不变量。
 ]
 
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "naive (3 kernels)",
+  size: [$B = 512$, $D_"in" = 512$, $D_"hidden" = 1024$, $D_"out" = 512$],
+  rows: (
+    ("linear1_kernel duration", "261.6 µs", "第一层 GEMM，占用最多时间"),
+    ("relu_kernel duration",    "5.9 µs",   "elementwise，微秒级"),
+    ("linear2_kernel duration", "140.3 µs", ""),
+    ("*Total 3-launch*",        "*~408 µs*", "含 3 次 launch overhead"),
+    ("linear1 Memory SOL",      "61.7 %",   "第一层未打满 HBM，其实 mid-tensor 写没吃满"),
+    ("relu Memory SOL",         "17.7 %",   "*太短*——15 μs kernel 起不了 HBM 稳态"),
+    ("linear2 Memory SOL",      "48.1 %",   ""),
+    ("Achieved Occupancy",      "91.4 %",   "linear kernels 都塞满 SM"),
+  ),
+)
+
+三个 kernel 序列告诉了我们两件事：
+
+- *linear1 + linear2* 都是 GEMM，各自能拿到 memSOL 50-60%，但 relu 只有 17.7%——`relu` kernel 只跑 5.9 μs，*HBM 甚至来不及进入稳态*。这是"activation 单独作为 kernel"的经典诟病：算术极其轻，全被 launch overhead + HBM ramp-up 淹没。
+- *中间 tensor `hidden[B × Dh] = 512 × 1024 × 4B = 2 MB`* 在 linear1 写 → relu 读 → linear2 读*三次* HBM。这是可以省掉的字节。
+
+#verdict(
+  problem: [三个独立 kernel 里 relu 只跑 5.9 μs 却付了完整的 launch + HBM ramp-up 成本；中间 tensor 走 HBM 三次],
+  evidence: [relu 单独 memSOL 17.7%（远低于 vector add 84%）；3 次 launch overhead \~15 μs 相对小 kernel 显著；hidden tensor 2 MB 在 kernel 之间 round-trip HBM],
+  next: [v2 (fused epilogue) 把 bias + ReLU 融进 linear1 —— 计算完 `matmul` 后不写 HBM，直接在 register 里 `+ bias`、`max(0, ·)`，再写出 —— 消除 relu kernel 和它的 launch overhead]
+)
+
 == v2: fused epilogue — bias + ReLU 在寄存器里完成
 
 ```cpp
@@ -260,6 +288,34 @@ $B=128, D_"hidden"=4096$：$Delta approx 4 "MB"$。A100 带宽 2.04 TB/s → 理
 #interview[
   *如何估算 epilogue fusion 收益？* 数 materialize 的中间 tensor 大小和访问次数，乘以 HBM 带宽倒数。若 kernel 已 compute-bound（大 batch + tensor core），fusion 收益比例下降——因为总时间 dominated by FMA 而非 epilogue traffic。
 ]
+
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "fused_epilogue (bias+ReLU into linear1)",
+  size: [$B = 512$, $D_"in" = 512$, $D_"hidden" = 1024$, $D_"out" = 512$],
+  rows: (
+    ("fused_linear1_relu",      "261.1 µs", "跟 naive linear1 几乎持平"),
+    ("linear2",                 "143.0 µs", "跟 naive 一样"),
+    ("*Total 2-launch*",        "*~404 µs*", "总时间只降 ~1%"),
+    ("fused Memory SOL",        "62.9 %",   "vs naive linear1 61.7% —— 几乎不变"),
+    ("linear2 L2 Hit",          "111.9 %",  "L2 hit > 100% 是 ncu 报告方式（含 sector 分摊）"),
+  ),
+)
+
+*总时间几乎没变*——为什么？
+
+- Fusion 消除了 `relu_kernel`（本身 5.9 μs）+ 1 次 launch overhead（~5 μs），共节省 10-11 μs。
+- 但 `fused_linear1_relu` 每 thread 多几个 `+ bias`、`max(0,·)`——如果编译器 pipeline 不好，会挤占其他 issue slot。
+- 更本质：*hidden tensor $H$ 依然被写到 HBM，然后被 linear2 从 HBM 读回来*。fused 版只是把 ReLU 从"独立 kernel"合进了 linear1 的 epilogue 里，*没有*让 $H$ 不落 HBM。
+
+这个 kernel 的存在证明了一个反直觉的事实：*epilogue fusion 的性能收益，主要来自减少访存*——不是减少 launch。$B = 512, D_"hidden" = 1024$ 时 hidden = 2 MB，往返 HBM 依然是主导。
+
+#verdict(
+  problem: [fused epilogue 只消掉了 relu kernel 的启动开销，*没有*让 hidden tensor 留在片上],
+  evidence: [total 从 408 μs 降到 404 μs（仅 1%）；hidden = 2 MB 依然走 HBM 一读一写],
+  next: [v3 (tiled_fused) 把整个 MLP 融进*一个 kernel*：linear1 结果留在 shared memory 里，linear2 直接从 smem 读——彻底消除 hidden 的 HBM 往返（前提是 $D_"hidden"$ 装得下 smem）]
+)
 
 == GEMM fusion 的极限：为什么不 fuse matmul1 + matmul2
 
@@ -455,6 +511,31 @@ Launch：`<<<kBatch, kTiledThreadsPerBlock>>>`，一个 block 负责一个 batch
 #insight[
   Tiled fused 版的额外收益：$X$ 被 $D_"hidden"$ 个 thread 复用（smem），第二层 $H$ 在 smem 被 $D_"out"$ 个 thread 读——*小模型里连 $H$ 的 global 读写都省了*。这是 inter-GEMM fusion 在 smem 能装下时的特例。
 ]
+
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "tiled_fused (single kernel)",
+  size: [$B = 512$, $D_"in" = 512$, $D_"hidden" = 1024$, $D_"out" = 512$],
+  rows: (
+    ("Duration (1 kernel)",     "732.5 µs", "*比 v2 慢 1.8×！*"),
+    ("Memory SOL",              "39.4 %",   ""),
+    ("Compute SOL",             "17.5 %",   ""),
+    ("Achieved Occupancy",      "41.4 %",   "*↓* —— shared memory + register 都用得多"),
+    ("Static SMEM / block",     "~4 KB",    "hidden_shared: D_hidden × 4B = 4096 B"),
+  ),
+)
+
+*慢了！*为什么？这是本章最重要的教学时刻：*fusion 不是免费的*。
+
+- Teaching kernel 是"每个 block 处理一个 batch row"设计——`gridDim = kBatch = 512`。每 block 只有 `max(kHiddenDim, kOutputDim) = 1024` 个 thread 单独承担一整个 output row 的所有工作。
+- $D_"hidden" = 1024$ 时 hidden_shared 占 4 KB smem——不算大。但 kernel 里 *thread 复用 X* 依赖大量 `for k in kInputDim` 的串行 load，*没有 tile 化*，也*不是 GEMM-friendly kernel*。这是 "prove fusion is possible" 的教学 kernel，不是 "prove fusion is fast" 的 production kernel。
+- 生产上 MLP fusion 走的是 cuBLASLt / CUTLASS：先做 GEMM 主循环（保 Tensor Core 效率），epilogue 里 fuse bias + ReLU。inter-GEMM fusion 只在 $D_"hidden"$ 极小时才可能有收益（LoRA、adapter 场景）。
+
+#final-verdict(
+  status: [教学 ladder 展示了 epilogue fusion（v2）和 inter-GEMM fusion（v3）两种思路。],
+  note: [*不要复制 tiled_fused kernel 到生产环境*。v2 (epilogue fusion) 是可以直接进 CUTLASS / cuBLASLt 的模板；v3 只在 hidden 很小时才 make sense。真正的 MLP 加速在 Tensor Core 上 —— 见第 04 章"CUTLASS 分层"节讨论。]
+)
 
 == Backward：dgelu 融合思路（简述）
 

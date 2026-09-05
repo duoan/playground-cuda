@@ -394,6 +394,37 @@ cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
   两个 matmul 的 naive GPU 实现（scores / value）都是 *memory-bound、零 tile 复用*——和第 4 章 matmul naive 同一类问题。工业界 $Q K^T$ 和 $P V$ 走 cuBLAS/tensor core；瓶颈往往在 $S/P$ 的 materialize，不在 matmul 本身。
 ]
 
+=== ncu 实测（naive 三 kernel chain）
+
+#ncu-snapshot(
+  version: "naive (scores → softmax → value)",
+  size: [seq=256, head_dim=64（batch=1, head=1）],
+  rows: (
+    ("scores_kernel",   "48.8 µs",  "$Q K^T$，$O(N^2 d)$ ops"),
+    ("softmax_kernel",  "32.6 µs",  "row-wise softmax on $N times N$ 矩阵"),
+    ("value_kernel",    "20.6 µs",  "$P V$，$O(N^2 d)$ ops"),
+    ("*Total (3 launches)*", "*~102 µs*", "含 3 次 launch overhead + HBM 中间 tensor 往返"),
+    ("scores Memory SOL",  "71.2 %",   "$Q$、$K$ 从 HBM 读，$S$ 写回 HBM"),
+    ("softmax Memory SOL", "32.7 %",   "$S$ 读一次，$P$ 写回一次"),
+    ("value Memory SOL",   "10.3 %",   "*非常低*——$V$ 每 row 被多个 output col 复用"),
+    ("Achieved Occupancy", "7-23 %",   "小 seq 时都撑不满 GPU"),
+  ),
+)
+
+*三个 kernel 加起来的开销*和它们对应的 workload 有关：
+
+- *scores kernel* 是 $O(N^2 d)$ 的 GEMM——`memSOL 71%` 说明 HBM-bound（跟第 4 章 naive matmul 同构，$V$ 未被复用）。
+- *softmax kernel* 处理 $N times N$ 的 `S` 矩阵：`memSOL 32.7%`——比 03_softmax 的 12% 高，因为 seq=256 让 grid 更大，SM 塞得更满。
+- *value kernel `memSOL 10.3%`* 是 attention naive 的最大痛点——$V$ 应该被 $N$ 个 query 复用，但 naive 每个 output 独立读 $V$ 的一整列。
+
+*中间 tensor $S$、$P$ 各是 $N times N times 4 = 256$ KB*（seq=256），一路走 HBM 三次。这个 $O(N^2)$ 显存 + 带宽开销随 seq 平方增长——是 FlashAttention 出现的根本动因。
+
+#verdict(
+  problem: [三个 kernel 之间通过 HBM 传递 $O(N^2)$ 中间 tensor $S$、$P$；value kernel 又没有 tile 化 $V$ 的复用],
+  evidence: [total 102 μs，其中 $S/P$ 在 HBM 里往返约 1 MB（$2 times 512$ KB）；value memSOL 10.3% 说明大量 memory pipeline 时间在等 $V$ 的重复读；seq $= 4096$ 时 $S$ 会变成 64 MB，直接 OOM],
+  next: [v2 (tiled) 把三步融进一个 kernel——把 $S$ / $P$ tile 化后存 shared memory，用 online softmax 做增量合并，让 $S$ 永远不落 HBM]
+)
+
 == Host 侧：三次 Launch 与中间缓冲
 
 源码 `run_naive_attention` 的数据流：
@@ -620,6 +651,33 @@ FlashAttention 对 $K/V$ 按 sequence 分块：每块在 shared memory 算局部
 *Observation*：四行对比的核心差异是中间 $S$ 的 HBM 复杂度——naive $O(N^2)$ 读写 vs FA $O(N)$ tile 在 smem；online merge（第 3 章公式）是 FA 正确性前提，使分块 softmax 与整行等价。本章 `attention_tiled_kernel` 是机制原型，$N=8$ 上 ~1.8× 加速主要来自少 launch，生产规模 IO 节省按 $N^2$ 放大。
 
 源码里 `attention_tiled_kernel` 是*预告*：单 kernel、sequence 维分 `kTileTokens`、online 更新 `running_max` / `running_sum`——与 naive 三 pass 对照跑通 CPU reference。$N = 8$ 上 fused 版 5.47 μs vs 三 pass 合计 9.92 μs（~1.8×，见 `=== 实测`）——*机制原型*，不是生产加速比。第 8 章会在更大 tile、warp 分工、$Q/K/V$ 双缓冲上展开。
+
+=== ncu 实测（tiled，机制原型）
+
+#ncu-snapshot(
+  version: "tiled (fused single kernel)",
+  size: [seq=256, head_dim=64],
+  rows: (
+    ("Duration (1 kernel)",     "135.6 µs", "*比 naive 三 kernel 总和 102 μs 慢！*"),
+    ("Memory SOL",              "15.1 %",   ""),
+    ("Compute SOL",             "16.8 %",   ""),
+    ("Achieved Occupancy",      "7.4 %",    "one-block-per-query 设计"),
+    ("Grid Size",               "256",      "$N$ 个 block（一个 query 一个 block）"),
+  ),
+)
+
+*慢了！*—— 这个反直觉结果需要正视。教学 tiled kernel 有几个明显的次优点：
+
+- *one-block-per-query*：每 block 处理 $N$ 个 key 全走一遍。seq=256, block=256 → 一个 query 一个 block，但 kernel 内是纯粹串行的 outer loop over tiles。没有 warp specialization，也没有 Tensor Core。
+- *smem 使用简陋*：`Q_tile[HEAD_DIM] + K_tile[TILE × HEAD_DIM] + V_tile[TILE × HEAD_DIM]`——K/V tile 在 smem 里没有 swizzle，也没有 async load。
+- Naive 三 kernel 版反而在 seq=256 时占了便宜：scores kernel 是 `<<<seq, seq>>>`，256×256 threads 有 65536 个 thread 撑满 GPU；tiled 版只有 256 blocks × 256 threads/block（当然还有 block 内的 tile-serial loop 让 SM 一直有活干，但并行度反而低）。
+
+真正 fast attention 在下一章 FlashAttention v1 展开：把 `attention_tiled_kernel` 的骨架换成 warp-per-row 结构 + `cp.async` + Tensor Core。
+
+#final-verdict(
+  status: [教学 tiled kernel 展示了 "1 kernel + online softmax + $S$ 不落 HBM" 的核心思想，是 FlashAttention 的最简 prototype。],
+  note: [但*机制原型不是性能实现*。seq=256 的小尺寸下，三 pass 的高并行度反而更快；到 seq $= 4096+$ 时 naive 因为 $S = 64$ MB OOM 或严重带宽瓶颈，tiled 的 $O(N)$ smem 就体现价值。真正的性能实现请看第 8 章 FlashAttention v1。]
+)
 
 === Self-attention vs Cross-attention（shape 不变）
 

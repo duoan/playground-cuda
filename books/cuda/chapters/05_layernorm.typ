@@ -136,6 +136,28 @@ Launch：`blocks = ceil(rows / 256)`，256 threads/block——每个 thread 独�
   naive 不是"写错了"——是*刻意保留的教学 baseline*。生产环境（Megatron、FlashAttention 配套 kernel）不会用 one-thread-per-row，但理解三 pass 逻辑是读 block/warp 版的前提。
 ]
 
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "naive (one thread per row)",
+  size: [$"rows" = 256$, $"cols" = 4096$],
+  rows: (
+    ("Duration",            "4 270 µs", ""),
+    ("Memory SOL",          "0.8 %",    "跟 softmax naive 完全同构——单 SM 空转"),
+    ("Compute SOL",         "0.0 %",    ""),
+    ("Achieved Occupancy",  "12.5 %",   ""),
+    ("Grid Size",           "1",        "一个 block！108 SM 中 107 个 idle"),
+  ),
+)
+
+跟 03_softmax naive 一模一样的病：*rows 太少 + one-thread-per-row = GPU 完全空转*。LayerNorm 里更糟：三 pass 而不是两 pass。
+
+#verdict(
+  problem: [one-thread-per-row 让 4096 元素被单 thread 串行处理，$"rows" = 256$ 又太少不能撑满 grid],
+  evidence: [Grid Size 1, Occupancy 12.5%, memSOL 0.8%],
+  next: [v3 (block-per-row) 让一个 256-thread block 协作处理一行——256 rows 就是 256 blocks，能填满 108 SM 大约 2.4 waves]
+)
+
 == v2: Welford 在线算法
 
 两 pass 公式（先算 mean，再算 $sum(x-mu)^2$）数学上精确，但*单 pass 朴素公式*：
@@ -334,6 +356,29 @@ Launch `<<<rows, 256>>>` 的 grid 维 = batch 行数。训练时 rows 大，occu
 
 softmax 的 subtract-max 是*数值*技巧；LayerNorm 的 sum/sumsq 是*访存*技巧——两者正交，FlashAttention 后的 post-norm block 里两个算子都会出现。
 
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "block (one block per row)",
+  size: [$"rows" = 256$, $"cols" = 4096$],
+  rows: (
+    ("Duration",            "21.7 µs",  "*比 naive 快 197×*"),
+    ("Memory SOL",          "12.5 %",   "跟 softmax block 版一样，被 shared memory reduction 阻塞"),
+    ("Compute SOL",         "16.7 %",   ""),
+    ("Achieved Occupancy",  "29.9 %",   ""),
+    ("Grid Size",           "256",      "256 blocks / 108 SM = 2.4 waves"),
+  ),
+)
+
+- *197× 提速*——绝大部分来自并行度改善（naive Grid=1 → block Grid=256）。algorithm 上是"三 pass → 三 pass 但块内协作"。
+- *memSOL 12.5%*：还是很低。原因是 kernel 内有 4 次 `__syncthreads`（load / mean / var / done）加上两次 shared memory tree reduction，这些成本被摊平在访存时间里。
+
+#verdict(
+  problem: [block 版依然是三 pass（load x → 算 mean、load x → 算 var、load x → 算 output），read $x$ 3 次；shared memory tree reduction 占用不少 cycle],
+  evidence: [Memory SOL 12.5% 远低于 vector add 的 84%；smem tree 内 4 次 `__syncthreads`；两次独立 reduction 各一次 barrier],
+  next: [v4 (warp_shuffle) 做两件事：(a) warp shuffle 替代 smem tree —— 消除 bank conflict + 减少 sync；(b) 一次扫描同时累积 sum 和 sumsq，减少 read $x$ 次数]
+)
+
 == v4: warp shuffle + sum/sumsq 融合
 
 源码 `layernorm_warp_kernel` 把 reduction 收到 warp 级，并用*一次扫描*同时累积 `sum` 和 `sumsq`：
@@ -427,6 +472,30 @@ sync 次数：2 次 `__syncthreads`（对比 block 版 4 次）。shuffle 绕过
 === broadcast mean / rstd
 
 `stats[0]` 和 `stats[1]` 写入 shared memory 后，*所有 thread* 通过 `__syncthreads` 看到相同的 mean 和 rstd。这和 softmax 里把 max 和 sum 广播给全 block 写 normalize 是同一模式——区别是 LayerNorm 的 affine 步还要读 $gamma, beta$，访存从 $1 + 2/H$ 倍（相对纯 normalize）变成 $1 + 2/H + 2$ 倍（$gamma, beta$ 各读一次）。
+
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "warp_shuffle (fused sum+sumsq)",
+  size: [$"rows" = 256$, $"cols" = 4096$],
+  rows: (
+    ("Duration",            "20.4 µs",  "比 block 快 6%（不是量级性的）"),
+    ("Memory SOL",          "11.1 %",   ""),
+    ("Compute SOL",         "11.5 %",   ""),
+    ("Achieved Occupancy",  "29.5 %",   ""),
+  ),
+)
+
+*收益比想象中小*——只快 6%。为什么？
+
+- warp shuffle *确实* 消除了 shared memory tree 的 bank conflict 和 barrier 数（从 4 次减到 1 次）。
+- 但 LayerNorm 是 *2-pass memory bound*：pass 1 (load x → 算 mean + variance)，pass 2 (load x, γ, β → 写 y)。真正的瓶颈是 $x$ 被读两次——warp shuffle 优化的是行内规约，*不减少访存*。
+- 如果继续追求量级性能，唯一的路径是*减少 pass 数*（如 online 版本，用增量更新的方式一遍搞定 mean + var），或者*和上下游融合*（把 pre-LN 和 attention 融合成一个 kernel）。
+
+#final-verdict(
+  status: [warp shuffle 版已经达到 standalone LayerNorm 的高效实现。],
+  note: [如果 rows 更大（batch × seq = 1024+），memSOL 会自然拉高到 20-30%（HBM 有时间稳态）。生产系统里 LayerNorm 更多是*被融合到别的 kernel 里*：pre-LN 融进 attention 的 Q/K/V 投影；post-LN 融进 residual add + activation；training 里融进 backward 的 chain rule。standalone LayerNorm 到这里够用。]
+)
 
 == v5: 向量化 load/store
 

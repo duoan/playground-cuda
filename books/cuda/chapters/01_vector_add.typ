@@ -6,10 +6,9 @@ vector add 是 CUDA 的 "hello world"，但它的正确用法不是当例子随�
 
 - 为什么 naive 版本已经能跑到接近峰值带宽（下一章 reduction 就不能）。
 - grid-stride 这个模式在生产代码里为什么无处不在，它的 *性能收益是 0*，但仍然值得写。
-- `float4` 宽访问为什么有效，什么时候它反而变成陷阱。
-- kernel launch 的开销结构，为什么把主体和尾巴 fuse 成一个 kernel 是有意义的。
+- `float4` 宽访问为什么有效，什么时候它反而变成陷阱；把主体和尾巴 fuse 成一个 kernel 有多大的实际收益。
 
-对应源码：`src/cuda/01_vector_add.cu`。
+对应源码：`src/cuda/01_vector_add/`（一个 version 一个文件：`01_naive.cu`, `02_grid_stride.cu`, `03_vectorized.cu`）。ncu 原始日志：`src/cuda/01_vector_add/ncu/`。
 
 == 问题定义
 
@@ -48,6 +47,10 @@ $ T_"min" = frac(3 N times 4 "B", 2.04 "TB/s") $
 - $N = 2^27$（512 MB per array，1.5 GB 总量）：$T_"min" approx 750 mu s$。这个规模才真正打满 HBM，也是本书用来做 vector add benchmark 的规模。
 
 任何比对应规模下 $T_"min"$ 慢 2 倍以上的实现，都存在明确的可优化点。
+
+#note[
+  本章所有的 ncu 数据都取自 `--set detailed` 抓取的日志，规模都用 $N = 2^27$（sweep 里的最大点）。规模再小时 L2 命中率飙高，`memory SOL %` 会失真，参考本章末的 sweep 表看 size 效应。
+]
 
 == v1: naive
 
@@ -111,106 +114,35 @@ warp 里 32 个 lane 的 `i` 是 `..., 32k, 32k+1, ..., 32k+31`——连续 32 �
 
 `vector_add_naive_kernel` 用 16 个寄存器（`ncu` 报告 `launch__registers_per_thread`）、0 shared memory。A100 一个 SM 支持 *2048 threads / 64 warps*，寄存器（64 K per SM）和 smem 都不是瓶颈，occupancy 接近 100%。
 
-=== 实测
+=== ncu 实测
 
-$N = 2^27$（每个数组 512 MB，总量 1.5 GB $ ≫ $ L2 = 40 MB），A100 80GB SXM4，`ncu` 抓取，`--binary-args "27"`。表中「HBM GB/s」列写作 *实测 / 逻辑*：前者是 `dram__bytes.sum / time`（ncu 实测的 HBM 传输量），后者是 $3 N dot 4 / "time"$（如果每字节都真去 HBM 拿一次的理论带宽）。这两个数字在 L2 装得下的小规模里差别巨大；在大规模下应当相互吻合。
+#ncu-snapshot(
+  version: "naive",
+  size: [$N = 2^27$，1.5 GB $ >> $ L2 40 MB],
+  rows: (
+    ("Duration",           "933 µs",   "vs 理论 750 µs（打满 HBM）"),
+    ("Memory SOL",         "84.2 %",   "已经接近打满 HBM 带宽"),
+    ("DRAM SOL",           "84.2 %",   "与 Memory SOL 一致——数据真的到了 HBM"),
+    ("Compute SOL",        "14.5 %",   "SM 大部分时间在等内存，不是在算"),
+    ("L2 Hit Rate",        "49.8 %",   "读 a/b 各流一次，加上写 c 的部分被读回"),
+    ("Achieved Occupancy", "86.0 %",   ""),
+    ("Registers / thread", "16",       "寄存器不是瓶颈"),
+  ),
+)
 
-#include "../bench/01_vector_add.typ"
+三件事在数字上立住了：
 
-*先看第一张 perf 表：*
+- *Memory SOL 84%*：memory pipeline 已经在极限工作，*没有可优化的访存模式*。任何优化如果不能进一步提高这个数字，本质上就没意义。
+- *Compute SOL 14.5%* + *Memory SOL 84%*：这就是 memory-bound kernel 的经典签名——两者一高一低，SM 的 issue slot 大量空闲，因为都在等 HBM 数据。roofline 判定得到实测确认。
+- *L2 Hit 49.8%*：这里*不是*说 L2 帮我们加速了。$a[i]$ 从 L1/L2 miss → 到 HBM 拿 → 写回 L2、L1。写 $c[i]$ 也会先写入 cache。第二次访问同 sector（相邻 lane）的时候 L2 命中——这是 sector 粒度访问的副作用，不是数据复用。1.5 GB 数据在 40 MB L2 里根本没有实际缓存价值。
 
-- 「实测 / 逻辑」两列*几乎完全一致*（naive: 1706/1715, vectorized: 1825/1837）——L2 命中率极低，*我们真的在打 HBM*。
-- naive 达到 *83.7% HBM peak*（1706 GB/s vs 2039 GB/s）——vector add 的 naive 已经是"接近打满带宽"的实现。这是本章第一个反直觉的结论：加优化 ≠ 显著提升。
-- `vectorized` / `vectorized-fused` 达到 *89.4-89.5%*，比 naive 高 5.8 个百分点。收益来自 `LDG.E.128` 一次搬 16 字节而非 4 字节，让 memory pipeline 上每 warp 的 outstanding request 携带更多数据（同 warp 的 32 lane × 128 bit = 512 B per LDG.E.128 vs. 32 × 32 bit = 128 B per LDG.E）。
-- `grid-stride` 反而*比 naive 慢 3%*，`tiled` 与 naive 打平。这直接印证我们之前说的：grid-stride 的价值在*通用性*（可以处理任意大 $N$，不受 grid 上限约束），不在性能。
+#verdict(
+  problem: [已经达到 84% HBM peak，*但离 90% 还有空间*，主要限制来自 memory controller 每次调度只带 128 B（4 B/lane × 32 lane），MSHR 队列的深度没有被充分利用],
+  evidence: [Memory SOL 84.2% 卡在 A100 memory subsystem 上界稍下的位置；Compute SOL 极低，说明 SM 无事可做在等 HBM],
+  next: [v3 的 `float4` 让每 lane 带 16 B (LDG.E.128)，一次 warp load 传 512 B，压 MSHR 队列更满。但先看 v2：解决工程性问题，不追性能],
+)
 
-*再看第二张 diag 表：*
-
-- `issued/32 = 32.0`：warp 里 32 个 lane *全都* 参与每条指令。所有 vector add 变体都是这样——没有 `if`，没有分支，硬件无需 predication mask。
-- `pred_on/32 = 27.8-30.9`：有 1-4 个 lane 是 predicated-off。这些是 grid-stride 的 loop tail、以及 vectorized-fused 的 tail-scalar 部分。看起来"效率下降"，其实*完全不影响性能*——因为这一切的瓶颈是 HBM，不是 SM 发射带宽。
-- `smem conf. = 0`：没有 shared memory 使用，理所当然。
-- `barrier stall = 0`：没有 `__syncthreads`。
-- `mem stall = 82-296`：*非常大*。这是关键——`smsp__average_warps_issue_stalled_long_scoreboard`，意思是每 issue-active cycle 有 82-296 个 warp *正在等 global memory*。这就是 memory-bound 的定量证据。
-
-#insight[
-  `mem stall` 是判断 memory-bound 的第一手证据。如果这个数字大（几十到几百），说明 warp 大量时间在等 HBM 回来。搭配 `HBM %` 一起看：mem_stall 高 + HBM % 高 → 已经打满 HBM，别再想减少访存以外的优化了；mem_stall 高 + HBM % 低 → 访存模式有问题（未合并、bank conflict、非对齐），有优化空间。
-]
-
-*为什么 vectorized `mem stall = 296` 比 naive `82` 高，但速度更快？*
-
-一个 warp 用 LDG.E.128 拿 512 B，需要*一次*长延迟等待；用 LDG.E 只拿 128 B，也需要一次长延迟等待。以每条 issued 指令的 "warps waiting" 归一化，vectorized 每个 issue slot 上等 memory 的 warp 密度*更高*——因为总 issue 数量少了（4 倍），但等 memory 的绝对时长没变。*这个 metric 不能孤立解读*，得配合 HBM % 才能得出"vectorized 更快"的结论。
-
-#warn[
-  A100 datasheet 的 HBM peak 2039 GB/s 是理论上界，实测受限于 memory scheduler、地址冲突、read/write 比例。工程上把 *~85-90% peak* 视作 "已经打满"。想过 95% 需要单纯读或单纯写（不像我们这里 2 读 + 1 写）。
-]
-
-#warn[
-  以上是 vector add 的特殊性——它的访存模式对硬件最友好。下一章 reduction 我们会看到 naive 到最终版本几十倍差距，不要把 "vector add naive 就够快" 推广到别的 kernel。
-]
-
-== v2: tiled (multi-items-per-thread)
-
-```cpp
-constexpr int kTiledThreadsPerBlock = 128;
-constexpr int kItemsPerThread = 4;
-constexpr int kTileSize = kTiledThreadsPerBlock * kItemsPerThread;  // 512
-
-__global__ void vector_add_tiled_kernel(
-    const float* a, const float* b, float* c, int count) {
-  const int tile_start = blockIdx.x * kTileSize;
-  const int thread_base = tile_start + threadIdx.x;
-
-  #pragma unroll
-  for (int item = 0; item < kItemsPerThread; ++item) {
-    const int i = thread_base + item * kTiledThreadsPerBlock;
-    if (i < count) {
-      c[i] = a[i] + b[i];
-    }
-  }
-}
-```
-
-*核心变化*：一个 thread 处理 4 个元素，一个 block（128 threads）处理一个 512 元素的 tile。
-
-=== 步长为什么是 `kTiledThreadsPerBlock`，不是 4
-
-关键在于*保持 warp 内的合并访问*。看两种写法：
-
-*错误写法*：每 thread 处理 4 个*连续*元素。
-```
-thread 0: 0, 1, 2, 3
-thread 1: 4, 5, 6, 7
-thread 2: 8, 9, 10, 11
-...
-```
-
-第 0 轮迭代（`item=0`），warp 内 32 个 lane 访问 `[0, 4, 8, ..., 124]`——跨 32×4=128 个元素但只用 32 个，*破坏合并*。
-
-*正确写法*（本 kernel）：每 thread 步长 `blockDim.x`。
-```
-thread 0: 0, 128, 256, 384
-thread 1: 1, 129, 257, 385
-thread 2: 2, 130, 258, 386
-...
-```
-
-第 0 轮，warp 访问 `[0, 1, ..., 31]`——连续，合并访问。第 1 轮 `[128, 129, ..., 159]`——还是连续。
-
-#insight[
-  多元素-per-thread 的核心原则：*让 warp 内 32 个 lane 在每一轮迭代里都保持连续访问*。step 应该等于 `blockDim.x`（对单维 block），不是 `kItemsPerThread`。
-]
-
-=== 为什么它对 vector add 也不显著变快
-
-理论上，多元素-per-thread 能：
-
-1. *摊销 index 计算*：`blockIdx.x * blockDim.x + threadIdx.x` 只算一次。
-2. *让编译器有机会用更宽的 load*：`#pragma unroll` 展开后，nvcc 有时能合并成 128-bit load。
-3. *隐藏访存延迟*：多个 outstanding load 同时飞在管线里。
-
-但 vector add naive 已经打满带宽了，这些优化空间为 0。tiled 版本这里主要作为*思维训练*——学习"一个 block 系统性处理一块数据"的分工方式。matmul 里 shared memory tiling 用的是同一个骨架。
-
-== v3: grid-stride loop
+== v2: grid-stride loop
 
 ```cpp
 __global__ void vector_add_grid_stride_kernel(
@@ -261,31 +193,74 @@ vector_add_grid_stride_kernel<<<blocks, 256>>>(a, b, c, count);
 
 如果写反了（`for (int j = 0; j < K; ++j) { c[i0*K + j] = ... }`），warp 就会跨越大的地址范围，破坏合并。
 
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "grid-stride",
+  size: [$N = 2^27$],
+  rows: (
+    ("Duration",           "969 µs",   "比 naive *慢* ~4%"),
+    ("Memory SOL",         "81.1 %",   "略降 3 个百分点"),
+    ("Compute SOL",        "46.3 %",   "循环控制流让 SM 多出些活干（无实际收益）"),
+    ("Registers / thread", "26",       "循环变量、stride、bounds check 占了 10 个寄存器"),
+    ("Achieved Occupancy", "85.8 %",   "跟 naive 几乎持平"),
+  ),
+)
+
+三个观察：
+
+- *速度略降 4%*。这印证了本章 opening 的宣言——grid-stride 的价值*不在性能*。循环的额外指令（`i += stride`、bounds check）在 memory-bound kernel 上转不成性能损失（等 HBM 的时间足够长），但也拿不到收益。
+- *Compute SOL 46% vs naive 14.5%*：SM 更"忙"了，但*忙的是循环控制流，不是有用工作*。这类假象很常见——`compSOL` 单独不能读出问题，得对比 `memSOL` 和真实 wall-clock。
+- *寄存器 26 vs 16*：多了 10 个。循环的 induction variable、stride、`count - i` 等等占用寄存器；如果 kernel 更复杂（更多变量），这可能推高 register pressure，进而压 occupancy。这里没到 threshold。
+
+#verdict(
+  problem: [grid-stride 本身没有性能瓶颈——它是*为通用性设计的*，代价是几个 % 的额外指令开销和寄存器占用],
+  evidence: [Duration ↑4%，Memory SOL ↓3pp；两个 kernel 都在 memory-bound regime，任何"改善指令流"的优化都被 HBM 等待掩盖],
+  next: [真正拿到 90%+ HBM peak 需要*换单条指令的数据宽度*，v3 用 `float4` 一次搬 128 位],
+)
+
 #warn[
   grid-stride 这个模式*本身不会让 kernel 变快*。vector add 上实测 naive ≈ grid-stride（甚至因为循环开销略慢）。它的价值是*通用性*：一份代码搞定任意数据规模，任意 GPU 型号。生产代码基本都用这个骨架。
 ]
 
-== v4: 向量化 load/store
+== v3: 向量化 (fused body + tail)
 
 ```cpp
 __global__ void vector_add_vectorized_kernel(
-    const float4* a4, const float4* b4, float4* c4, int vector_count) {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < vector_count) {
-    const float4 lhs = a4[i];
-    const float4 rhs = b4[i];
-    c4[i] = make_float4(
+    const float* a, const float* b, float* c, int count) {
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+  const int n_vec = count / 4;
+  const int n_tail = count - n_vec * 4;
+  const int tail_offset = n_vec * 4;
+
+  if (tid < n_vec) {
+    const auto* a4 = reinterpret_cast<const float4*>(a);
+    const auto* b4 = reinterpret_cast<const float4*>(b);
+    auto* c4 = reinterpret_cast<float4*>(c);
+    const float4 lhs = a4[tid];
+    const float4 rhs = b4[tid];
+    c4[tid] = make_float4(
         lhs.x + rhs.x, lhs.y + rhs.y,
         lhs.z + rhs.z, lhs.w + rhs.w);
+  }
+
+  if (tid < n_tail) {
+    const int i = tail_offset + tid;
+    c[i] = a[i] + b[i];
   }
 }
 ```
 
-把 `float*` 重解释成 `float4*`，一次读写 128 bit。这一步在有些 memory-bound kernel 上能提 30~50% 性能。vector add 本身已经打满，提升有限，但机制值得讲清楚。
+把 `float*` 重解释成 `float4*`，一次读写 128 bit。这一步在有些 memory-bound kernel 上能提 30~50% 性能。vector add 本身已经打满，提升有限（实测约 6 个百分点），但机制值得讲清楚。
+
+#note[
+  另一种"教科书"写法是把 body 和 tail 拆成两个 kernel：body 签名直接是 `float4*`（host 侧 `reinterpret_cast` 后传入），tail 单独用一个 scalar kernel 处理 `count % 4` 个剩余元素。分开写更好读，但要*两次* `launch`——生产代码里几乎没人这么写，所以本章直接上 fused 的单 kernel 版。
+]
 
 === 编译器视角：LDG.E.128
 
-`float4` 是编译器认识的 built-in type，字段对齐到 16 字节。上面的 kernel 编译出来的 SASS 里，`a4[i]` 变成一条 `LDG.E.128` 指令——单条指令加载 128 bit。
+`float4` 是编译器认识的 built-in type，字段对齐到 16 字节。上面的 kernel 编译出来的 SASS 里，`a4[tid]` 变成一条 `LDG.E.128` 指令——单条指令加载 128 bit。
 
 对比 naive 版本的三次单独 `LDG.E.32`（如果编译器没合并），指令数是 1/4。指令 fetch/decode 是有代价的，虽然对 memory-bound kernel 不显著，对 compute-bound 或 instruction-bound kernel（比如 softmax 里的大量除法）就有影响。
 
@@ -316,44 +291,11 @@ auto* p4 = reinterpret_cast<float4*>(a + offset);  // 危险
 
 只有 `offset % 4 == 0` 时才对齐。否则会触发 `misaligned address` 错误（或者更糟：在某些老架构上静默降级到多次窄访问）。
 
-=== 尾巴问题
+=== 尾巴问题：为什么 fuse 得起来
 
-`count` 不是 4 的倍数怎么办？例如 `count = 10`：主体处理 `count / 4 = 2` 个 `float4`（下标 0..7），剩下 `10 - 8 = 2` 个 float（下标 8, 9）不能用 `float4` 读。
+`count` 不是 4 的倍数怎么办？例如 `count = 10`：`n_vec = count / 4 = 2` 个完整 float4（下标 0..7），`n_tail = 10 - 8 = 2` 个 scalar 尾巴（下标 8, 9）。
 
-本节 kernel 只处理完整 `float4` 前缀，尾巴由 host 侧另起一个 scalar kernel 处理。这个思路清晰，但要两次 launch。下一节 fuse 起来。
-
-== v5: fused vectorized + tail
-
-```cpp
-__global__ void vector_add_vectorized_fused_kernel(
-    const float* a, const float* b, float* c, int count) {
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-  const int n_vec = count / 4;
-  const int n_tail = count - n_vec * 4;
-  const int tail_offset = n_vec * 4;
-
-  if (tid < n_vec) {
-    const auto* a4 = reinterpret_cast<const float4*>(a);
-    const auto* b4 = reinterpret_cast<const float4*>(b);
-    auto* c4 = reinterpret_cast<float4*>(c);
-    const float4 lhs = a4[tid];
-    const float4 rhs = b4[tid];
-    c4[tid] = make_float4(
-        lhs.x + rhs.x, lhs.y + rhs.y,
-        lhs.z + rhs.z, lhs.w + rhs.w);
-  }
-
-  if (tid < n_tail) {
-    const int i = tail_offset + tid;
-    c[i] = a[i] + b[i];
-  }
-}
-```
-
-=== 关键观察
-
-`n_tail` 永远 $in {0, 1, 2, 3}$。所以*前 4 个 thread* 就足以覆盖尾巴。
+关键观察：`n_tail` 永远 $in {0, 1, 2, 3}$。所以*前 4 个 thread* 就足以覆盖尾巴。
 
 grid 只需按 `n_vec` 开——尾巴由已存在的 tid=0..3 顺手处理。tid=0 在这个 kernel 里干了两件事：一次 float4 加法 + 一次 scalar 加法。
 
@@ -371,7 +313,7 @@ grid 只需按 `n_vec` 开——尾巴由已存在的 tid=0..3 顺手处理。ti
     [2], [—], [—],
     [3+], [—], [—],
   ),
-  caption: [*Table:* v5 fused vectorized + tail kernel 在 $"count" = 10$（$n_"vec" = 2$、$n_"tail" = 2$、$"tail"_"offset" = 8$）时各 thread 的分工。*tid* 为 block 内 thread 下标；*主体* / *尾巴* 列分别对应 `if (tid < n_vec)` 与 `if (tid < n_tail)` 两个独立 guard 的激活范围与写入目标。],
+  caption: [*Table:* fused vectorized kernel 在 $"count" = 10$（$n_"vec" = 2$、$n_"tail" = 2$、$"tail"_"offset" = 8$）时各 thread 的分工。*tid* 为 block 内 thread 下标；*主体* / *尾巴* 列分别对应 `if (tid < n_vec)` 与 `if (tid < n_tail)` 两个独立 guard 的激活范围与写入目标。],
   kind: table,
 )
 
@@ -395,9 +337,38 @@ if (tid < n_vec) {
 
 === fuse 的实际收益
 
-省一次 kernel launch = 省 ~5 μs。对 $N = 2^20$ 的 vector add（本身也就几微秒），这个省法能让端到端时间 -30%。对 $N = 10^9$ 的大数组（几百毫秒级别），launch overhead 可以忽略。
+省一次 kernel launch = 省 ~5 μs。对 $N = 2^20$ 的 vector add（本身也就几微秒），如果按分离 body + tail 的教科书写法，这两次 launch 的固定开销就能让端到端多花 30%+。对 $N = 10^9$ 的大数组（几百毫秒级别），launch overhead 可以忽略。
 
 *fuse 的普适规则*：kernel 越小、launch 越频繁，fuse 收益越大。这是为什么框架里有 `torch.jit.script` / `torch.compile` 的 elementwise fuser。
+
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "vectorized",
+  size: [$N = 2^27$],
+  rows: (
+    ("Duration",           "878 µs",   "vs naive 933 µs，*快 6%*"),
+    ("Memory SOL",         "89.4 %",   "从 84% 拉到 ~90%——已经接近能拿到的上限"),
+    ("DRAM SOL",           "89.4 %",   ""),
+    ("Compute SOL",        "7.0 %",    "指令数少了 4×，SM 更闲了"),
+    ("L2 Hit Rate",        "49.4 %",   "跟 naive 一致——数据流动模式没变"),
+    ("Grid Size",          "131 072",  "vs naive 524 288，正好 1/4"),
+    ("Registers / thread", "16",       "跟 naive 一样"),
+  ),
+)
+
+跟 naive 对比：
+
+- *Memory SOL: 84.2 → 89.4 (+5.2 pp)*。这就是"提高 MSHR 队列压力"的实证——每个 warp 的 outstanding request 携带 4× 数据后，memory scheduler 把更多的 HBM 带宽利用起来。
+- *Compute SOL: 14.5 → 7.0*。SM 更闲，因为每 warp 只需要 issue 1 次 `LDG.E.128` 而不是 4 次 `LDG.E`。这本身不带来性能收益（memory-bound 时 SM 闲不闲无所谓），但如果继续叠加计算——比如 `c[i] = a[i] * b[i] + c[i]`——空出的 SM 时间就能用上了。
+- *Grid Size: 减 4×*。因为 v3 的 grid 按 `n_vec = count / 4` 开而非 `count`。这也解释了为什么 registers 不涨——kernel 里的临时变量数量不变，编译器不会因为处理更多元素就多开寄存器。
+
+#final-verdict(
+  status: "vector add 的性能上限接近达到。",
+  note: [89.4% HBM peak 已经是这个访存模式（2 read + 1 write）的实用上界。剩下 ~10% 是 memory scheduler 无法完全消除的地址冲突、行切换、read/write 交替开销。想进一步接近 100%，需要单纯读或单纯写的 workload（比如 memcpy）。这一章的 ladder 到这里停止；更宽的 `float8` 在 A100 上没有对应 SASS 指令，反而会被编译器拆回 2 × `LDG.E.128`。]
+)
+
+我们把 `#final-verdict` 的判定叫成"落地"，是因为对 vector add 而言 v3 已经足够放到生产。后面章节的 ladder 因为算法层面还有优化空间（tile、pipeline、warp 特化），最后的 verdict 会带更多"下一步能做什么"的补充。
 
 == 关于 kernel launch 开销
 
@@ -415,8 +386,47 @@ launch 一次 kernel 涉及：
 减小 launch 开销的方法：
 
 - *CUDA Graph*：把一系列 launch 录制成 graph，一次 replay。framework 里 `torch.compile` 会用到。
-- *Fused kernel*：多个逻辑步骤在一个 kernel 内完成（本章 v5，或者更复杂的 attention 融合）。
+- *Fused kernel*：多个逻辑步骤在一个 kernel 内完成（本章 v3 就把 float4 主体和 scalar 尾巴 fuse 进一个 kernel，或者更复杂的 attention 融合）。
 - *Persistent kernel*：一个 kernel 长时间跑，通过 device-side 同步接受任务。RNN inference 用得比较多。
+
+== 实测：全 size sweep 对比
+
+上面每 version 的 ncu 快照都取自 $N = 2^27$。下面这张 sweep 表覆盖 $N in {2^20, 2^22, 2^24, 2^26, 2^27}$，能看出 L2-fit → HBM-bound 转折点。
+
+$N = 2^27$（每个数组 512 MB，总量 1.5 GB $ ≫ $ L2 = 40 MB），A100 80GB SXM4，`ncu` 抓取，`--binary-args "27"`。表中「HBM GB/s」列写作 *实测 / 逻辑*：前者是 `dram__bytes.sum / time`（ncu 实测的 HBM 传输量），后者是 $3 N dot 4 / "time"$（如果每字节都真去 HBM 拿一次的理论带宽）。这两个数字在 L2 装得下的小规模里差别巨大；在大规模下应当相互吻合。
+
+#include "../bench/01_vector_add.typ"
+
+*先看第一张 perf 表：*
+
+- 「实测 / 逻辑」两列*几乎完全一致*（naive: 1706/1715, vectorized: 1825/1837）——L2 命中率极低，*我们真的在打 HBM*。
+- naive 达到 *83.7% HBM peak*（1706 GB/s vs 2039 GB/s）——vector add 的 naive 已经是"接近打满带宽"的实现。这是本章第一个反直觉的结论：加优化 ≠ 显著提升。
+- `vectorized` 达到 *89.4-89.5%*，比 naive 高 5.8 个百分点。收益来自 `LDG.E.128` 一次搬 16 字节而非 4 字节，让 memory pipeline 上每 warp 的 outstanding request 携带更多数据（同 warp 的 32 lane × 128 bit = 512 B per LDG.E.128 vs. 32 × 32 bit = 128 B per LDG.E）。
+- `grid-stride` 反而*比 naive 慢 3%*。这直接印证我们之前说的：grid-stride 的价值在*通用性*（可以处理任意大 $N$，不受 grid 上限约束），不在性能。
+
+*再看第二张 diag 表：*
+
+- `issued/32 = 32.0`：warp 里 32 个 lane *全都* 参与每条指令。所有 vector add 变体都是这样——没有 `if`，没有分支，硬件无需 predication mask。
+- `pred_on/32 = 27.8-30.9`：有 1-4 个 lane 是 predicated-off。这些是 grid-stride 的 loop tail、以及 vectorized 版本的 tail-scalar 部分。看起来"效率下降"，其实*完全不影响性能*——因为这一切的瓶颈是 HBM，不是 SM 发射带宽。
+- `smem conf. = 0`：没有 shared memory 使用，理所当然。
+- `barrier stall = 0`：没有 `__syncthreads`。
+- `mem stall = 82-296`：*非常大*。这是关键——`smsp__average_warps_issue_stalled_long_scoreboard`，意思是每 issue-active cycle 有 82-296 个 warp *正在等 global memory*。这就是 memory-bound 的定量证据。
+
+#insight[
+  `mem stall` 是判断 memory-bound 的第一手证据。如果这个数字大（几十到几百），说明 warp 大量时间在等 HBM 回来。搭配 `HBM %` 一起看：mem_stall 高 + HBM % 高 → 已经打满 HBM，别再想减少访存以外的优化了；mem_stall 高 + HBM % 低 → 访存模式有问题（未合并、bank conflict、非对齐），有优化空间。
+]
+
+*为什么 vectorized `mem stall = 296` 比 naive `82` 高，但速度更快？*
+
+一个 warp 用 LDG.E.128 拿 512 B，需要*一次*长延迟等待；用 LDG.E 只拿 128 B，也需要一次长延迟等待。以每条 issued 指令的 "warps waiting" 归一化，vectorized 每个 issue slot 上等 memory 的 warp 密度*更高*——因为总 issue 数量少了（4 倍），但等 memory 的绝对时长没变。*这个 metric 不能孤立解读*，得配合 HBM % 才能得出"vectorized 更快"的结论。
+
+#warn[
+  A100 datasheet 的 HBM peak 2039 GB/s 是理论上界，实测受限于 memory scheduler、地址冲突、read/write 比例。工程上把 *~85-90% peak* 视作 "已经打满"。想过 95% 需要单纯读或单纯写（不像我们这里 2 读 + 1 写）。
+]
+
+#warn[
+  以上是 vector add 的特殊性——它的访存模式对硬件最友好。下一章 reduction 我们会看到 naive 到最终版本几十倍差距，不要把 "vector add naive 就够快" 推广到别的 kernel。
+]
 
 == ncu 该看什么
 
@@ -511,9 +521,9 @@ vector_add<<<grid, block>>>(a, b, c, n);
 ]
 
 #interview[
-  *Q5*: 为什么 tiled 版本里 thread 的 stride 是 `blockDim.x` 而不是 `items_per_thread`？
+  *Q5*: grid-stride loop 里为什么 stride 一定是 `blockDim.x * gridDim.x`？换成 `items_per_thread` 会怎样？
 
-  A: 保持每一轮迭代 warp 内合并访问。stride = items_per_thread 会让 warp 内 lane 跨大范围访问，破坏合并，性能骤降。
+  A: 保持每一轮迭代 warp 内合并访问。用 `blockDim.x * gridDim.x` 步进，第 $k$ 轮 warp 里 32 个 lane 访问 `[k·stride, k·stride+31]`——连续。如果反过来让每个 thread 处理一段连续的 `K` 个元素，warp 内 lane 就跨越 `32·K` 个元素，破坏合并，带宽利用率直接掉到 $1/K$。
 ]
 
 #interview[

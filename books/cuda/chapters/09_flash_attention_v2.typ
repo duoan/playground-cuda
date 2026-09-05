@@ -652,6 +652,32 @@ Device 侧 state 变量语义：
   `old_scale == 0` 当 `running_sum == 0`（首个 tile）：`accum *= 0` 等价 fresh start，与第 8 章 v1 教学 kernel 相同 trick。
 ]
 
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "tile_staged (smem staging)",
+  size: [$N_q = 128$, $N_k = 512$, head_dim = 32],
+  rows: (
+    ("Duration",            "354.4 µs", "vs FA v1 shared 595 μs，*快 1.7×*（$d=32$）"),
+    ("Memory SOL",          "23.1 %",   ""),
+    ("Compute SOL",         "8.7 %",    ""),
+    ("L2 Hit Rate",         "98.9 %",   ""),
+    ("Achieved Occupancy",  "1.9 %",    "$N_q = 128$ 行 × warp-per-row → 128 blocks 仍不满 GPU"),
+  ),
+)
+
+v2 相比 v1 的算法层收益（延迟归一化 + Q-outer 循环）已经落地，$d=32$ 时快 1.7×。但 memSOL 只有 23%——原因：
+
+- 教学 kernel 用 `<<<N_q, 32>>>`（一个 warp 处理一个 query row）——这个"warp-per-row"分工*要求 head_dim ≤ 32*，否则一个 warp 装不下所有 $d$ 维。
+- $d = 32$ 时刚好一个 warp = 32 lanes 覆盖整个 head_dim。
+- Occupancy 1.9% 说明 GPU 大部分 SM 依然 idle —— 需要 batch 和 head 维度上并行来填满硬件（生产 FA v2 的 `<<<num_heads × batch × ceil(N_q / B_r), 128>>>` 是这样做的）。
+
+#verdict(
+  problem: [smem staging + Q-outer 已经把算法拉直，但 warp-per-row 分工没有让 warp 内 lanes 之间做更细粒度的工作分离],
+  evidence: [Memory SOL 23% 说明 HBM 还没打满；Compute SOL 8.7% 说明 warp 内的 32 lanes 都在算 head_dim 长度为 32 的同一个 dot product],
+  next: [v2 (warp-specialized) 让不同的 lane 负责不同的角色 —— e.g. lane 0-15 负责一个 $Q K^T$ tile，lane 16-31 负责下一个 tile 的 $V$ 累加，用 warp-level primitives 做 tile 之间的 register 通信]
+)
+
 == v2: warp-specialized kernel
 
 `flash_attention_v2_warp_kernel` 在 smem staging 之上加入 lane 角色分离：
@@ -747,6 +773,30 @@ __syncthreads();
 #insight[
   warp kernel 相对 smem kernel 的核心增量是 *Step C 和 Step E 的并行度*——这正是 split-Q 的缩影：把原本 thread 0 串行的 $O(d)$ 和 $O(B_c)$ 工作拆给多个 lane/warp。生产 FA-2 进一步把 Step C/E 换成 WGMMA，Step D 留在 CUDA core/SFU。
 ]
+
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "warp_specialised",
+  size: [$N_q = 128$, $N_k = 512$, head_dim = 32],
+  rows: (
+    ("Duration",            "330.1 µs", "vs staged 354 μs，快 7%"),
+    ("Memory SOL",          "23.6 %",   ""),
+    ("Compute SOL",         "6.8 %",    "*↓ 从 8.7%*——SM 变闲，warp 内不再全 lane 算同一 dot"),
+    ("L2 Hit Rate",         "100.3 %",  ""),
+    ("Achieved Occupancy",  "1.9 %",    ""),
+  ),
+)
+
+*7% 提升*——比预期小。原因跟教学 kernel 的性质有关：
+
+- warp specialization 把 Step C（$O$ 累加）和 Step E（sum 归一化）拆给不同 lane，减少了串行部分，但*head_dim = 32* 让 warp 的 32 lane 刚好一人一维，本身已经是完美的 lane parallelism。
+- 真正会大幅提升的 workload 是 head_dim 更大时（e.g. $d = 128$），单 warp 无法 cover $d$，此时 warp specialization + split-Q 让多 warp 协作。教学 kernel 卡在 $d <= 32$，观察窗口有限。
+
+#final-verdict(
+  status: [FA v2 教学 kernel 展示了延迟归一化、Q-outer 循环、warp specialization 三个关键 v1→v2 变化。],
+  note: [$d = 32$ 的 warp-per-row 设计是本 kernel 的硬约束。生产 FA v2 用 $B_r = 128$ / 4 warp 的 CTA 布局 —— 每 warp 独立处理 32 个 query row，每 row 由 4 warp 组内的 32 lanes 一起 cover $d = 128$ 的 head_dim。教学 kernel 到此为止，下章 v3 展示 async pipeline。]
+)
 
 == Causal Mask 优化
 

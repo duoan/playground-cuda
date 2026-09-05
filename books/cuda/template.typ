@@ -116,6 +116,85 @@
   [*面试考点.* #body],
 )
 
+// Per-version ncu snapshot.  Renders a compact table of the key metrics we
+// pulled out of the detailed log at the sweep's largest size, plus a short
+// interpretation line.  Called from every "=== ncu 实测" subsection inside a
+// version's write-up.
+//
+// Usage:
+//   #ncu-snapshot(
+//     version: "naive",
+//     size: [N = 2\u{02c6}27 (1.5 GB, > L2)],
+//     rows: (
+//       ("Duration",             "933 µs"),
+//       ("Memory Throughput",    "84.2 %",   "SOL memory"),
+//       ("Compute Throughput",   "14.5 %",   "SOL compute"),
+//       ("L2 Hit Rate",          "49.8 %"),
+//       ("Registers / thread",   "16"),
+//     ),
+//   )
+#let ncu-snapshot(
+  version: "",
+  size: none,
+  rows: (),
+) = {
+  block(
+    fill: rgb("#f8fafc"),
+    stroke: (left: 3pt + rgb("#0f766e")),
+    inset: (x: 12pt, y: 10pt),
+    radius: 2pt,
+    width: 100%,
+    [
+      *ncu 实测 — v: #version.* #if size != none { [ 规模: #size.] }
+      #v(0.3em)
+      #table(
+        columns: if rows.at(0).len() == 3 { (auto, auto, 1fr) } else { (auto, auto) },
+        stroke: none,
+        inset: (x: 6pt, y: 3pt),
+        align: (left, right, left),
+        ..rows.flatten().map(x => [#text(size: 9pt, x)]),
+      )
+    ]
+  )
+}
+
+// Compact "problem → evidence → fix" callout used at the end of each version.
+// Explicit fields are cleaner than prose here because we're doing this 30
+// times across the book.
+//
+// Usage:
+//   #verdict(
+//     problem: "one thread per row: 4096 loads serialise instead of running as one warp",
+//     evidence: "occupancy 3.1 %, memory SOL 0.8 %, duration 3.99 ms",
+//     next: "v2 puts one *block* on each row so the 256 lanes cooperate",
+//   )
+#let verdict(problem: "", evidence: "", next: none) = block(
+  fill: rgb("#fef2f2"),
+  stroke: (left: 3pt + rgb("#b91c1c")),
+  inset: (x: 12pt, y: 8pt),
+  radius: 2pt,
+  width: 100%,
+  [
+    *瓶颈判定.* #problem
+    #if evidence != "" { linebreak(); text[*证据.* #evidence] }
+    #if next != none { linebreak(); text[*下一步.* #next] }
+  ]
+)
+
+// Same shape as `verdict`, but for the terminal version of a chapter — no
+// "next" field, we simply state where the ladder stopped.
+#let final-verdict(status: "", note: none) = block(
+  fill: rgb("#f0fdf4"),
+  stroke: (left: 3pt + rgb("#15803d")),
+  inset: (x: 12pt, y: 8pt),
+  radius: 2pt,
+  width: 100%,
+  [
+    *落地评估.* #status
+    #if note != none { linebreak(); note }
+  ]
+)
+
 // ---- kernel ladder table ----
 // Usage:
 //   #ladder(

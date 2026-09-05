@@ -1,0 +1,178 @@
+# ncu --set detailed
+# binary  : /home/duo.an/workspaces/playground-cuda/build/04_matmul/01_naive_miscoalesced
+# argv    : 512 512 512
+# defines : (none)
+# size tag: n512
+# date    : 2026-09-03T23:21:20Z
+# gpu     : NVIDIA A100-SXM4-80GB
+# ncu     : NVIDIA (R) Nsight Compute Command Line Profiler
+# note    : argv = m n k (symmetric).  K7 wants n%16, m%32; K8 wants m,n%32.
+
+==PROF== Connected to process 367456 (/home/duo.an/workspaces/playground-cuda/build/04_matmul/01_naive_miscoalesced)
+==PROF== Profiling "matmul_kernel" - 0: 0%....50%....100% - 18 passes
+matmul [naive_miscoalesced] PASS  m=512 n=512 k=512
+==PROF== Disconnected from process 367456
+[367456] 01_naive_miscoalesced@127.0.0.1
+  <unnamed>::matmul_kernel(const float *, const float *, float *, int, int, int) (32, 32, 1)x(16, 16, 1), Context 1, Stream 7, Device 0, CC 8.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         1.59
+    SM Frequency                    Ghz         1.15
+    Elapsed Cycles                cycle      717,608
+    Memory Throughput                 %        92.20
+    DRAM Throughput                   %         0.17
+    Duration                         us       621.38
+    L1/TEX Cache Throughput           %        98.08
+    L2 Cache Throughput               %         3.44
+    SM Active Cycles              cycle   674,633.36
+    Compute (SM) Throughput           %        10.86
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of the device.   
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing L1 in the Memory Workload Analysis section.                                                
+
+    Section: GPU Speed Of Light Roofline Chart
+    INF   The ratio of peak float (FP32) to double (FP64) performance on this device is 2:1. The workload achieved 3%   
+          of this device's FP32 peak performance and 0% of its FP64 peak performance. See the Profiling Guide           
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline) for more details on roofline      
+          analysis.                                                                                                     
+
+    Section: Compute Workload Analysis
+    -------------------- ----------- ------------
+    Metric Name          Metric Unit Metric Value
+    -------------------- ----------- ------------
+    Executed Ipc Active   inst/cycle         0.27
+    Executed Ipc Elapsed  inst/cycle         0.26
+    Issue Slots Busy               %         6.39
+    Issued Ipc Active     inst/cycle         0.27
+    SM Busy                        %         6.39
+    -------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 94.39%                                                                                    
+          All compute pipelines are under-utilized. Either this workload is very small or it doesn't issue enough warps 
+          per scheduler. Check the Launch Statistics and Scheduler Statistics sections for further details.             
+
+    Section: Memory Workload Analysis
+    -------------------------------------- ----------- ------------
+    Metric Name                            Metric Unit Metric Value
+    -------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                0
+    Local Memory Spilling Request Overhead           %            0
+    Memory Throughput                          Gbyte/s         3.39
+    Mem Busy                                         %        92.20
+    Max Bandwidth                                    %        13.55
+    L1/TEX Hit Rate                                  %        97.59
+    L2 Persisting Size                           Mbyte         7.86
+    L2 Compression Success Rate                      %            0
+    L2 Compression Ratio                                          0
+    L2 Compression Input Sectors                sector            0
+    L2 Hit Rate                                      %        95.44
+    Mem Pipes Busy                                   %        10.86
+    -------------------------------------- ----------- ------------
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                  1,024
+    Registers Per Thread             register/thread              32
+    Shared Memory Configuration Size           Kbyte           32.77
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block       byte/block               0
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             108
+    Stack Size                                                 1,024
+    Threads                                   thread         262,144
+    # TPCs                                                        54
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                1.19
+    -------------------------------- --------------- ---------------
+
+    OPT   Est. Speedup: 50%                                                                                             
+          A wave of thread blocks is defined as the maximum number of blocks that can be executed in parallel on the    
+          target GPU. The number of blocks in a wave depends on the number of multiprocessors and the theoretical       
+          occupancy of the kernel. This kernel launch results in 1 full waves and a partial wave of 160 thread blocks.  
+          Under the assumption of a uniform execution duration of all thread blocks, this partial wave may account for  
+          up to 50.0% of the total runtime of this kernel. Try launching a grid with no partial wave. The overall       
+          impact of this tail effect also lessens with the number of full waves executed for a grid. See the Hardware   
+          Model (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-hw-model) description for     
+          more details on launch configurations.                                                                        
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block           32
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp           64
+    Theoretical Occupancy                     %          100
+    Achieved Occupancy                        %        66.95
+    Achieved Active Warps Per SM           warp        42.85
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 33.05%                                                                                    
+          The difference between calculated theoretical (100.0%) and measured achieved occupancy (67.0%) can be the     
+          result of warp scheduling overheads or workload imbalances during the kernel execution. Load imbalances can   
+          occur between warps within a block as well as across blocks of the same kernel. See the CUDA Best Practices   
+          Guide (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) for more details on     
+          optimizing occupancy.                                                                                         
+
+    Section: GPU and Memory Workload Distribution
+    -------------------------- ----------- ------------
+    Metric Name                Metric Unit Metric Value
+    -------------------------- ----------- ------------
+    Average DRAM Active Cycles       cycle     1,645.60
+    Total DRAM Elapsed Cycles        cycle   39,588,992
+    Average L1 Active Cycles         cycle   674,633.36
+    Total L1 Elapsed Cycles          cycle   77,501,068
+    Average L2 Active Cycles         cycle   527,035.32
+    Total L2 Elapsed Cycles          cycle   54,426,800
+    Average SM Active Cycles         cycle   674,633.36
+    Total SM Elapsed Cycles          cycle   77,501,068
+    Average SMSP Active Cycles       cycle   674,594.01
+    Total SMSP Elapsed Cycles        cycle  310,004,272
+    -------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 5.323%                                                                                          
+          One or more SMs have a much higher number of active cycles than the average number of active cycles.          
+          Additionally, other SMs have a much lower number of active cycles than the average number of active cycles.   
+          Maximum instance value is 5.66% above the average, while the minimum instance value is 5.43% below the        
+          average.                                                                                                      
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 5.319%                                                                                          
+          One or more SMSPs have a much higher number of active cycles than the average number of active cycles.        
+          Additionally, other SMSPs have a much lower number of active cycles than the average number of active         
+          cycles. Maximum instance value is 5.66% above the average, while the minimum instance value is 5.45% below    
+          the average.                                                                                                  
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 5.323%                                                                                          
+          One or more L1 Slices have a much higher number of active cycles than the average number of active cycles.    
+          Additionally, other L1 Slices have a much lower number of active cycles than the average number of active     
+          cycles. Maximum instance value is 5.66% above the average, while the minimum instance value is 5.43% below    
+          the average.                                                                                                  
+
+    Section: Source Counters
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Branch Instructions Ratio           %         0.02
+    Branch Instructions              inst      335,872
+    Branch Efficiency                   %          100
+    Avg. Divergent Branches      branches            0
+    ------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 54.69%                                                                                          
+          This kernel has uncoalesced global accesses resulting in a total of 50429952 excessive sectors (71% of the    
+          total 71434240 sectors). Check the L2 Theoretical Sectors Global Excessive table for the primary source       
+          locations. The CUDA Programming Guide                                                                         
+          (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses) has additional      
+          information on reducing uncoalesced device memory accesses.                                                   
+

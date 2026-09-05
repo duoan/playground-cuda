@@ -1,0 +1,44 @@
+{
+  "log": "src/cuda/05_layernorm/ncu/01_naive_r128c4096.txt",
+  "meta": {
+    "binary": "/home/duo.an/workspaces/playground-cuda/build/05_layernorm/01_naive",
+    "argv": "128 4096",
+    "defines": "(none)",
+    "size_tag": "r128c4096",
+    "date": "2026-09-03T19:15:34Z",
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "ncu": "NVIDIA (R) Nsight Compute Command Line Profiler",
+    "note": "argv = rows cols"
+  },
+  "kernels": [
+    {
+      "kernel": "layernorm_kernel",
+      "grid": "1,1,1",
+      "block": "256,1,1",
+      "duration_ms": 2.18,
+      "elapsed_cycles": 2523073.0,
+      "sm_active_cycles": 23261.11,
+      "sol_memory_pct": 0.79,
+      "sol_dram_pct": 0.06,
+      "sol_compute_pct": 0.04,
+      "sol_l1_pct": 85.33,
+      "sol_l2_pct": 0.65,
+      "l1_hit_pct": 89.95,
+      "l2_hit_pct": 93.5,
+      "mem_throughput_gbs": 1.22,
+      "mem_max_bw_pct": 0.65,
+      "ipc_active": 0.09,
+      "issue_slots_busy": 0.02,
+      "registers": 32.0,
+      "block_size": 256.0,
+      "grid_size": 1.0,
+      "static_smem_bytes": 0.0,
+      "dyn_smem_bytes": 0.0,
+      "waves_per_sm": 0.0,
+      "occupancy_pct": 6.26,
+      "theo_occupancy_pct": 100.0,
+      "branch_efficiency": 100.0,
+      "duration_us_norm": 2180.0
+    }
+  ]
+}

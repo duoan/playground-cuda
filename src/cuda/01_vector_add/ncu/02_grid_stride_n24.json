@@ -1,0 +1,43 @@
+{
+  "log": "src/cuda/01_vector_add/ncu/02_grid_stride_n24.txt",
+  "meta": {
+    "binary": "/home/duo.an/workspaces/playground-cuda/build/01_vector_add/02_grid_stride",
+    "argv": "24",
+    "defines": "(none)",
+    "size_tag": "n24",
+    "date": "2026-09-03T19:02:27Z",
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "ncu": "NVIDIA (R) Nsight Compute Command Line Profiler",
+    "note": "argv = log2N; count = (1 << log2N) [ + 37 for reduce_sum ]"
+  },
+  "kernels": [
+    {
+      "kernel": "vector_add_kernel",
+      "grid": "65536,1,1",
+      "block": "256,1,1",
+      "duration_us": 120.22,
+      "elapsed_cycles": 137955.0,
+      "sm_active_cycles": 134451.33,
+      "sol_memory_pct": 79.14,
+      "sol_dram_pct": 79.14,
+      "sol_compute_pct": 46.9,
+      "sol_l1_pct": 19.81,
+      "sol_l2_pct": 78.67,
+      "l1_hit_pct": 0.0,
+      "l2_hit_pct": 48.47,
+      "mem_max_bw_pct": 79.14,
+      "ipc_active": 1.91,
+      "issue_slots_busy": 46.9,
+      "registers": 26.0,
+      "block_size": 256.0,
+      "grid_size": 65536.0,
+      "static_smem_bytes": 0.0,
+      "dyn_smem_bytes": 0.0,
+      "waves_per_sm": 75.85,
+      "occupancy_pct": 83.97,
+      "theo_occupancy_pct": 100.0,
+      "branch_efficiency": 100.0,
+      "duration_us_norm": 120.22
+    }
+  ]
+}

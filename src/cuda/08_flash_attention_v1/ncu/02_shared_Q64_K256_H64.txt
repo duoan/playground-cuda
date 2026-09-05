@@ -1,0 +1,182 @@
+# ncu --set detailed
+# binary  : /home/duo.an/workspaces/playground-cuda/build/08_flash_attention_v1/02_shared__HEAD_DIM64_KEY_COUNT256_QUERY_COUNT64
+# argv    : (none)
+# defines : -DQUERY_COUNT=64 -DKEY_COUNT=256 -DHEAD_DIM=64
+# size tag: Q64_K256_H64
+# date    : 2026-09-03T19:20:37Z
+# gpu     : NVIDIA A100-SXM4-80GB
+# ncu     : NVIDIA (R) Nsight Compute Command Line Profiler
+# note    : -D QUERY_COUNT -D KEY_COUNT -D HEAD_DIM
+
+==PROF== Connected to process 176779 (/home/duo.an/workspaces/playground-cuda/build/08_flash_attention_v1/02_shared__HEAD_DIM64_KEY_COUNT256_QUERY_COUNT64)
+==PROF== Profiling "fa_v1_shared_kernel" - 0: 0%....50%....100% - 18 passes
+flash_attention_v1 [shared] PASS  q=64 k=256 d=64
+==PROF== Disconnected from process 176779
+[176779] 02_shared__HEAD_DIM64_KEY_COUNT256_QUERY_COUNT64@127.0.0.1
+  <unnamed>::fa_v1_shared_kernel(const float *, const float *, const float *, float *, int, int, int) (64, 1, 1)x(64, 1, 1), Context 1, Stream 7, Device 0, CC 8.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         1.59
+    SM Frequency                    Ghz         1.15
+    Elapsed Cycles                cycle      339,956
+    Memory Throughput                 %        13.22
+    DRAM Throughput                   %         0.03
+    Duration                         us       294.40
+    L1/TEX Cache Throughput           %        22.48
+    L2 Cache Throughput               %         1.26
+    SM Active Cycles              cycle   199,971.56
+    Compute (SM) Throughput           %         4.59
+    ----------------------- ----------- ------------
+
+    OPT   This kernel grid is too small to fill the available resources on this device, resulting in only 0.1 full      
+          waves across all SMs. Look at Launch Statistics for more details.                                             
+
+    Section: GPU Speed Of Light Roofline Chart
+    INF   The ratio of peak float (FP32) to double (FP64) performance on this device is 2:1. The workload achieved      
+          close to 0% of this device's FP32 peak performance and 0% of its FP64 peak performance. See the Profiling     
+          Guide (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline) for more details on         
+          roofline analysis.                                                                                            
+
+    Section: Compute Workload Analysis
+    -------------------- ----------- ------------
+    Metric Name          Metric Unit Metric Value
+    -------------------- ----------- ------------
+    Executed Ipc Active   inst/cycle         0.22
+    Executed Ipc Elapsed  inst/cycle         0.13
+    Issue Slots Busy               %         3.21
+    Issued Ipc Active     inst/cycle         0.22
+    SM Busy                        %         3.48
+    -------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 96.52%                                                                                    
+          All compute pipelines are under-utilized. Either this workload is very small or it doesn't issue enough warps 
+          per scheduler. Check the Launch Statistics and Scheduler Statistics sections for further details.             
+
+    Section: Memory Workload Analysis
+    -------------------------------------- ----------- ------------
+    Metric Name                            Metric Unit Metric Value
+    -------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                0
+    Local Memory Spilling Request Overhead           %            0
+    Memory Throughput                          Mbyte/s       601.30
+    Mem Busy                                         %        13.22
+    Max Bandwidth                                    %         4.59
+    L1/TEX Hit Rate                                  %        87.50
+    L2 Persisting Size                           Mbyte         7.86
+    L2 Compression Success Rate                      %            0
+    L2 Compression Ratio                                          0
+    L2 Compression Input Sectors                sector            0
+    L2 Hit Rate                                      %        97.74
+    Mem Pipes Busy                                   %         4.59
+    -------------------------------------- ----------- ------------
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                    64
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                     64
+    Registers Per Thread             register/thread             168
+    Shared Memory Configuration Size           Kbyte           65.54
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block       byte/block               0
+    Static Shared Memory Per Block       Kbyte/block            2.33
+    # SMs                                         SM             108
+    Stack Size                                                 1,024
+    Threads                                   thread           4,096
+    # TPCs                                                        54
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                0.10
+    -------------------------------- --------------- ---------------
+
+    OPT   Est. Speedup: 40.74%                                                                                          
+          The grid for this launch is configured to execute only 64 blocks, which is less than the GPU's 108            
+          multiprocessors. This can underutilize some multiprocessors. If you do not intend to execute this kernel      
+          concurrently with other workloads, consider reducing the block size to have at least one block per            
+          multiprocessor or increase the size of the grid to fully utilize the available hardware resources. See the    
+          Hardware Model (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-hw-model)            
+          description for more details on launch configurations.                                                        
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            6
+    Block Limit Shared Mem                block           18
+    Block Limit Warps                     block           32
+    Theoretical Active Warps per SM        warp           12
+    Theoretical Occupancy                     %        18.75
+    Achieved Occupancy                        %         3.10
+    Achieved Active Warps Per SM           warp         1.99
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 83.45%                                                                                    
+          The difference between calculated theoretical (18.8%) and measured achieved occupancy (3.1%) can be the       
+          result of warp scheduling overheads or workload imbalances during the kernel execution. Load imbalances can   
+          occur between warps within a block as well as across blocks of the same kernel. See the CUDA Best Practices   
+          Guide (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) for more details on     
+          optimizing occupancy.                                                                                         
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Local Speedup: 81.25%                                                                                    
+          The 3.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (18.8%) is limited by the number of required      
+          registers.                                                                                                    
+
+    Section: GPU and Memory Workload Distribution
+    -------------------------- ----------- ------------
+    Metric Name                Metric Unit Metric Value
+    -------------------------- ----------- ------------
+    Average DRAM Active Cycles       cycle       138.30
+    Total DRAM Elapsed Cycles        cycle   18,754,560
+    Average L1 Active Cycles         cycle   199,971.56
+    Total L1 Elapsed Cycles          cycle   36,715,216
+    Average L2 Active Cycles         cycle    10,070.33
+    Total L2 Elapsed Cycles          cycle   25,783,440
+    Average SM Active Cycles         cycle   199,971.56
+    Total SM Elapsed Cycles          cycle   36,715,216
+    Average SMSP Active Cycles       cycle    99,375.11
+    Total SMSP Elapsed Cycles        cycle  146,860,864
+    -------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 23.99%                                                                                          
+          One or more SMs have a much lower number of active cycles than the average number of active cycles. Maximum   
+          instance value is 40.78% above the average, while the minimum instance value is 100.00% below the average.    
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 20.64%                                                                                          
+          One or more SMSPs have a much lower number of active cycles than the average number of active cycles. Maximum 
+          instance value is 70.61% above the average, while the minimum instance value is 100.00% below the average.    
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 23.99%                                                                                          
+          One or more L1 Slices have a much lower number of active cycles than the average number of active cycles.     
+          Maximum instance value is 40.78% above the average, while the minimum instance value is 100.00% below the     
+          average.                                                                                                      
+
+    Section: Source Counters
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Branch Instructions Ratio           %         0.02
+    Branch Instructions              inst      111,168
+    Branch Efficiency                   %        90.02
+    Avg. Divergent Branches      branches        18.96
+    ------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 2.338%                                                                                          
+          This kernel has uncoalesced global accesses resulting in a total of 1572864 excessive sectors (75% of the     
+          total 2101760 sectors). Check the L2 Theoretical Sectors Global Excessive table for the primary source        
+          locations. The CUDA Programming Guide                                                                         
+          (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses) has additional      
+          information on reducing uncoalesced device memory accesses.                                                   
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 33.91%                                                                                          
+          This kernel has uncoalesced shared accesses resulting in a total of 1572864 excessive wavefronts (58% of the  
+          total 2728192 wavefronts). Check the L1 Wavefronts Shared Excessive table for the primary source locations.   
+          The CUDA Best Practices Guide                                                                                 
+           (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-in-matrix-multiplication-c
+          -ab) has an example on optimizing shared memory accesses.                                                     
+

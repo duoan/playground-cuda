@@ -1,0 +1,141 @@
+# ncu --set detailed
+# binary  : /home/duo.an/workspaces/playground-cuda/build/02_reduce_sum/02_interleaved
+# argv    : 21
+# defines : (none)
+# size tag: n21
+# date    : 2026-09-03T21:42:50Z
+# gpu     : NVIDIA A100-SXM4-80GB
+# ncu     : NVIDIA (R) Nsight Compute Command Line Profiler
+# note    : argv = log2N; atomic version fails self-check above n=22 due to fp32 accumulator precision, so we stop there
+
+==PROF== Connected to process 259587 (/home/duo.an/workspaces/playground-cuda/build/02_reduce_sum/02_interleaved)
+==PROF== Profiling "reduce_sum_kernel" - 0: 0%....50%....100% - 18 passes
+reduce_sum [interleaved] PASS  count=2097189  sum=6.29156e+06
+==PROF== Disconnected from process 259587
+[259587] 02_interleaved@127.0.0.1
+  <unnamed>::reduce_sum_kernel(const float *, float *, int) (8193, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 8.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         1.59
+    SM Frequency                    Ghz         1.14
+    Elapsed Cycles                cycle       52,765
+    Memory Throughput                 %        35.50
+    DRAM Throughput                   %         8.93
+    Duration                         us        46.14
+    L1/TEX Cache Throughput           %        37.54
+    L2 Cache Throughput               %         9.00
+    SM Active Cycles              cycle    49,676.31
+    Compute (SM) Throughput           %        71.46
+    ----------------------- ----------- ------------
+
+    OPT   Compute is more heavily utilized than Memory: Look at the Compute Workload Analysis section to see what the   
+          compute pipelines are spending their time doing. Also, consider whether any computation is redundant and      
+          could be reduced or moved to look-up tables.                                                                  
+
+    Section: GPU Speed Of Light Roofline Chart
+    INF   The ratio of peak float (FP32) to double (FP64) performance on this device is 2:1. The workload achieved      
+          close to 0% of this device's FP32 peak performance and 0% of its FP64 peak performance. See the Profiling     
+          Guide (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline) for more details on         
+          roofline analysis.                                                                                            
+
+    Section: Compute Workload Analysis
+    -------------------- ----------- ------------
+    Metric Name          Metric Unit Metric Value
+    -------------------- ----------- ------------
+    Executed Ipc Active   inst/cycle         3.01
+    Executed Ipc Elapsed  inst/cycle         2.85
+    Issue Slots Busy               %        71.46
+    Issued Ipc Active     inst/cycle         3.02
+    SM Busy                        %        71.46
+    -------------------- ----------- ------------
+
+    INF   ALU is the highest-utilized pipeline (53.2%) based on elapsed cycles in the workload, taking into account the 
+          rates of its different instructions. It executes integer and logic operations. It is well-utilized, but       
+          should not be a bottleneck.                                                                                   
+
+    Section: Memory Workload Analysis
+    -------------------------------------- ----------- ------------
+    Metric Name                            Metric Unit Metric Value
+    -------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                0
+    Local Memory Spilling Request Overhead           %            0
+    Memory Throughput                          Gbyte/s       181.86
+    Mem Busy                                         %        35.50
+    Max Bandwidth                                    %        31.48
+    L1/TEX Hit Rate                                  %            0
+    L2 Persisting Size                           Mbyte         7.86
+    L2 Compression Success Rate                      %            0
+    L2 Compression Ratio                                          0
+    L2 Compression Input Sectors                sector            0
+    L2 Hit Rate                                      %         8.85
+    Mem Pipes Busy                                   %        31.48
+    -------------------------------------- ----------- ------------
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                  8,193
+    Registers Per Thread             register/thread              16
+    Shared Memory Configuration Size           Kbyte           32.77
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block            1.02
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             108
+    Stack Size                                                 1,024
+    Threads                                   thread       2,097,408
+    # TPCs                                                        54
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                9.48
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Block Limit SM                        block           32
+    Block Limit Registers                 block           16
+    Block Limit Shared Mem                block           16
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp           64
+    Theoretical Occupancy                     %          100
+    Achieved Occupancy                        %        90.92
+    Achieved Active Warps Per SM           warp        58.19
+    ------------------------------- ----------- ------------
+
+    Section: GPU and Memory Workload Distribution
+    -------------------------- ----------- ------------
+    Metric Name                Metric Unit Metric Value
+    -------------------------- ----------- ------------
+    Average DRAM Active Cycles       cycle     6,556.20
+    Total DRAM Elapsed Cycles        cycle    2,937,088
+    Average L1 Active Cycles         cycle    49,676.31
+    Total L1 Elapsed Cycles          cycle    5,673,696
+    Average L2 Active Cycles         cycle    36,960.71
+    Total L2 Elapsed Cycles          cycle    3,992,640
+    Average SM Active Cycles         cycle    49,676.31
+    Total SM Elapsed Cycles          cycle    5,673,696
+    Average SMSP Active Cycles       cycle    49,555.27
+    Total SMSP Elapsed Cycles        cycle   22,694,784
+    -------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 14%                                                                                             
+          One or more L2 Slices have a much higher number of active cycles than the average number of active cycles.    
+          Maximum instance value is 18.90% above the average, while the minimum instance value is 5.74% below the       
+          average.                                                                                                      
+
+    Section: Source Counters
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Branch Instructions Ratio           %         0.05
+    Branch Instructions              inst      794,722
+    Branch Efficiency                   %       100.00
+    Avg. Divergent Branches      branches         0.00
+    ------------------------- ----------- ------------
+

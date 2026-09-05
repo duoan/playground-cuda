@@ -8,10 +8,8 @@ softmax 是 transformer 里 attention score 归一化的核心，也是面试里
 - subtract-max trick 的数学推导——不是"经验技巧"，而是严格等价变换。
 - online softmax（Milakov & Gimelshein, 2018）——*单遍扫描*维护 running max + running sum，FlashAttention 的数值基础。
 - block-per-row + shared memory 两次 reduction 的标准并行模板。
-- warp-per-row + shuffle 两次 reduction——行宽 ≤ 32 时的极致路径。
-- 向量化 load/store 与 fused softmax（mask、causal、scale）。
 
-对应源码：`src/cuda/03_softmax.cu`。
+对应源码：`src/cuda/03_softmax/`（一个 version 一个文件：`01_naive.cu`, `02_block.cu`, `03_online.cu`）。带 mask 或 causal 语义的变体不再作为独立 kernel 单独实现——mask/causal 在 attention 章节（第 7 章及之后）里跟 attention pipeline 一起讲更自然。
 
 本章 optimization ladder：
 
@@ -19,12 +17,9 @@ softmax 是 transformer 里 attention score 归一化的核心，也是面试里
   ("naive",        "1 thread / row, 3 pass",           "~5%"),
   ("online",       "1 thread / row, running max+sum",  "~5%"),
   ("block",        "1 block / row, 2× smem reduce",    "~40%"),
-  ("warp",         "1 warp / row, 2× shuffle reduce",  "~55%"),
-  ("vectorized",   "float4 load in block kernel",      "~50%"),
-  ("fused",        "mask / causal / scale inline",     "—"),
 )
 
-前两个版本并行度相同（一行一 thread），差异在 pass 数和数值技巧；block / warp 解决行内并行；向量化与 fusion 是带宽与 launch 层面的锦上添花。ladder 里百分比是 A100 上 `sm__cycles_active`（SM %），不是相对 naive 的加速比——实测 naive / online 的 SM % 都约 0.9%（单 block），block 约 35%。
+前两个版本并行度相同（一行一 thread），差异在 pass 数和数值技巧；block 版本解决行内并行。ladder 里百分比是 A100 上 `sm__cycles_active`（SM %），不是相对 naive 的加速比——实测 naive / online 的 SM % 都约 0.9%（单 block），block 约 35%。
 
 与第 2 章 reduce sum 的关系：softmax 的 max-reduction 和 sum-reduction *复用同一套 block/warp shuffle 模板*——区别只是归约算子（`fmaxf` vs `+`）和 sum 阶段需要先 broadcast max。能把 reduce 章的 ladder 平移过来，是面试里展示"kernel 模式可组合"的好例子。
 
@@ -136,11 +131,36 @@ __global__ void softmax_naive_kernel(
   sum 用 `double` 累加是刻意的：$C$ 很大时 float 累加 $exp(x - m) in [0, 1]$ 会丢精度。面试追问"为什么不用 float 累加"时，答*大 C 下 ULP 误差*。
 ]
 
-并行度问题是本章实测里最大的杀手——$64 "rows"$ 时 naive / online / masked / causal 的 grid 只有 $(1, 1, 1)$，整颗 GPU 几乎空转。详见本章「实测」节。
+并行度问题是本章实测里最大的杀手——$64 "rows"$ 时 naive / online 的 grid 只有 $(1, 1, 1)$，整颗 GPU 几乎空转。详见本章「实测」节。
 
 === 和 vector add 的对比
 
 vector add 里每个元素独立，thread 之间零通信；softmax 里同一行的所有元素通过 max 和 sum *强耦合*——必须先知道整行的 max 才能安全算 exp，必须先知道整行的 sum 才能归一化。这个依赖链决定了优化 ladder 的主线：*先把行内规约并行化*（block / warp reduction），再考虑*减少 pass 数*（online），最后才是 load/store 宽度与 fusion。
+
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "naive (one thread per row)",
+  size: [$"rows" = 256$, $"cols" = 4096$（4 MB）],
+  rows: (
+    ("Duration",            "3 990 µs", "3.99 ms 处理 4 MB——是同规模 vector add 的 ~500×"),
+    ("Memory SOL",          "0.8 %",    "HBM 几乎空转"),
+    ("Compute SOL",         "0.3 %",    "SM 也空——`exp` 走 MUFU，pipeline 单窄"),
+    ("Achieved Occupancy",  "12.5 %",   "grid 只有 (1,1,1)，256 rows 装不满 108 个 SM"),
+    ("Grid Size",           "1",        "*一个 block！整颗 GPU 只有 8 个 warp 活着*"),
+  ),
+)
+
+*Occupancy 12.5% + Grid Size 1* 是全书最戏剧性的读数：GPU 有 108 个 SM，我们只用了 1 个 SM 上的 256 个 thread，*其余 107 SM 完全空转*——3.99 ms 里 99% 的硬件在闲置。
+
+- *memSOL 0.8%*：一行 4096 个元素被单 thread 串行读，warp 里 32 lane 每次只有 lane 0 在做——完全打不开访存 pipeline。
+- *compSOL 0.3%*：exp 走 MUFU (multi-function unit)，单 SM 上 MUFU 吞吐有限；再叠加 warp 内 31 个 lane idle，MUFU 也是极低利用率。
+
+#verdict(
+  problem: [one-thread-per-row 让 GPU 的行内 4096 个元素被串行处理，*整颗 GPU 只有 1 个 SM 在工作*——是并行度分配问题，不是访存或计算瓶颈],
+  evidence: [Grid Size = 1, Occupancy 12.5%, memSOL 0.8%, compSOL 0.3% 全线极低],
+  next: [v3 (block) 把行内 4096 元素分给 256 个 thread 协作规约——一个 block 处理一行，256 rows 就有 256 个 block，正好把 108 个 SM 填满 ~2.4 waves]
+)
 
 == Online Softmax：单遍维护 max 与 sum
 
@@ -272,6 +292,28 @@ Pass 1 合并了 max + sum（online），Pass 2 写输出。访存从 3× 降到
   *单跑 online kernel 不会比 naive 快*——实测 `time` 252.29 μs vs 120.80 μs（慢 2.1×）。Pass 1 里每步要算 `exp(row_max - new_row_max)` 做重标定，MUFU 指令比 naive 三 pass 的"先 max 再 bulk exp"更碎；且仍是单 block launch，`SM %` ~0.9%。online 的价值是*流式可合并*（FlashAttention tile merge），不是 standalone softmax 的加速手段。
 ]
 
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "online (one thread per row)",
+  size: [$"rows" = 256$, $"cols" = 4096$],
+  rows: (
+    ("Duration",            "3 890 µs", "跟 naive 几乎持平（-2.5%），*不是加速*"),
+    ("Memory SOL",          "0.7 %",    ""),
+    ("Compute SOL",         "0.4 %",    ""),
+    ("Achieved Occupancy",  "12.4 %",   "跟 naive 一样，同样只用了 1 个 block"),
+    ("Grid Size",           "1",        ""),
+  ),
+)
+
+*所有 metric 都跟 naive 几乎完全一致*——把三 pass 压缩成两 pass 完全被单 thread 处理一行的并行度问题掩盖。这印证了 "online 不是速度手段，是流式可合并语义"。
+
+#verdict(
+  problem: [online softmax 减少了访存 pass 数，但*没有解决并行度问题*——瓶颈依然是 one-thread-per-row],
+  evidence: [Grid Size 1, memSOL 0.7% —— 与 naive 完全同构],
+  next: [v3 (block) 用 shared memory tree reduction 把行内规约并行化。online 语义在 FlashAttention 那章会带来真正的价值：*当你没有整行数据时*，online 能合并部分统计量。]
+)
+
 == v3: block-per-row + shared memory reduction
 
 ```cpp
@@ -382,7 +424,7 @@ block 版本用两次独立 reduction 是正确的并行分解。online 公式�
 
 `shared_max[256] + shared_sum[256]` = 2 KB smem——远低于 SM 48 KB 上限。寄存器方面，每 thread 几个 float + 循环变量，通常 < 32 regs，occupancy 接近 100%。瓶颈不在资源，在*每行只用一个 block*——rows 不够多时 SM 填不满。
 
-改进：一个 block 处理*多行*——例如 256 threads = 8 warps，每 warp 一行（即 v4 warp-per-row 的扩展）。grid 维从 rows 降到 $ceil("rows" / 8)$，同时提高 SM 利用率。
+改进：一个 block 处理*多行*——例如 256 threads = 8 warps，每 warp 一行（warp-per-row 的常见扩展）。grid 维从 rows 降到 $ceil("rows" / 8)$，同时提高 SM 利用率。
 
 === block 大小的选择
 
@@ -392,188 +434,29 @@ block 版本用两次独立 reduction 是正确的并行分解。online 公式�
   `blockIdx.x = row` 意味着 grid 维 = rows。batch × heads × seq 很大时 rows 足够；若 rows 很小（如 1），整个 GPU 只跑 1 个 block——此时应合并多行到一个 block，或走 warp-per-row。
 ]
 
-== v4: warp-per-row + shuffle reduction
+=== ncu 实测
 
-当 $C <= 32$（或 padding 到 32）时，一行恰好在一个 warp 内——可以用 shuffle 做 reduction，*零 shared memory*。
-
-```cpp
-__device__ float warp_reduce_max(float val) {
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
-  }
-  return val;
-}
-
-__device__ float warp_reduce_sum(float val) {
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    val += __shfl_down_sync(0xffffffff, val, offset);
-  }
-  return val;
-}
-
-__global__ void softmax_warp_kernel(
-    const float* input, float* output, int rows, int cols) {
-  const int row = blockIdx.x;
-  const int lane = threadIdx.x & 31;
-  const int warp_id = threadIdx.x >> 5;
-  const int warps_per_block = blockDim.x >> 5;
-  const int r = row * warps_per_block + warp_id;
-  if (r >= rows) return;
-
-  const float* row_ptr = input + r * cols;
-  float* out_ptr = output + r * cols;
-
-  float x = (lane < cols) ? row_ptr[lane] : -INFINITY;
-  const float row_max = warp_reduce_max(x);
-
-  float exp_val = (lane < cols) ? expf(x - row_max) : 0.0f;
-  const float row_sum = warp_reduce_sum(exp_val);
-
-  if (lane < cols) {
-    out_ptr[lane] = exp_val / row_sum;
-  }
-}
-```
-
-=== 机制
-
-- lane $i$ 持有 $x_i$（$i >= C$ 的 lane 喂 $-oo$ / 0，不参与）。
-- `warp_reduce_max`：5 步 shuffle down，lane 0 得到 row max。
-- 每 lane 算 $exp(x_i - m)$，再 `warp_reduce_sum`。
-- 每 lane 写回自己的输出——*无 shared memory sync*，latency 最低。
-
-Launch 示例：`<<<ceil(rows/8), 256>>>`，一个 block 8 个 warp = 8 行。cuDNN / PyTorch 对小 $C$ 的 softmax 走类似路径。
-
-=== shuffle reduction 逐步拆解
-
-以 warp 内 max reduction 为例（5 步，offset = 16, 8, 4, 2, 1）：
-
-#figure(
-  table(
-    columns: (auto, 1fr),
-    stroke: 0.5pt + gray,
-    inset: 6pt,
-    [ *step* ], [ *lane 0 持有* ],
-    [初始], [$x_0$],
-    [offset=16], [$max(x_0, x_16)$],
-    [offset=8], [$max(x_0, x_8, x_16, x_24)$],
-    [offset=4], [前 16 个 lane 的 max],
-    [offset=2], [前 8 个 lane 的 max],
-    [offset=1], [前 4 个 lane 的 max],
-    [结束], [lane 0 = 全 warp 32 列的 max],
+#ncu-snapshot(
+  version: "block (one block per row)",
+  size: [$"rows" = 256$, $"cols" = 4096$],
+  rows: (
+    ("Duration",            "21.1 µs",  "*比 naive 快 189×*"),
+    ("Memory SOL",          "10.1 %",   "从 0.8% 拉到 10% ——一个 kernel 内做两次 reduce 限制了持续 HBM 打满"),
+    ("Compute SOL",         "23.5 %",   ""),
+    ("Achieved Occupancy",  "28.3 %",   ""),
+    ("Grid Size",           "256",      "vs naive 1 —— 256 个 block 分给 108 个 SM，2.4 waves"),
   ),
-  caption: [*Table:* warp 内 max reduction 的 5 步 `__shfl_down_sync` 过程（offset = 16, 8, 4, 2, 1）。每步 lane 0 持有的值覆盖 lane 数翻倍：1 → 2 → 4 → 8 → 16 → 32。sum reduction 结构相同，仅 `fmaxf` 换为 `+`。],
-  kind: table,
 )
 
-*Observation*：5 步 shuffle 与 block 版 8 步 tree reduction 同构——都是 $O(log N)$ 深度，但 warp shuffle *零 shared memory、零 barrier*，latency 最低。代价是覆盖范围锁死在 32 lane：$C > 32$ 时必须 multi-warp 或退回 block 版，这正是 v4 warp-per-row 的适用边界。
+*189×* 的提速大部分来自单纯的并行度改善：Grid Size 从 1 涨到 256，每个 block 有 256 个 thread 协作规约行内 4096 元素。这两个 lever 一乘：$256 times 256 / 256 = 256×$——加上 shared memory tree reduction 引入的额外开销，实际拿到 189×。
 
-`__shfl_down_sync` 把高 lane 的值拉到低 lane；5 步后 lane 0 持有全局 max。sum reduction 结构相同，只是 `fmaxf` 换成 `+`。
+- *memSOL 10%*：远低于 vector add / matmul 的 80%+，因为这个 kernel 内部要做*两次*行内 reduction（max、sum），每次都要写 smem + sync，dominated by shared memory traffic that isn't reflected in DRAM SOL。
+- *Occupancy 28%*：block 内 256 thread、每 thread 需要维护 accumulator，寄存器不多；smem 用得少（2KB）——理论 occupancy 可以更高，但实测被 memory pipeline 的等待时间压低。
 
-#warn[
-  $C > 32$ 时单个 warp 放不下整行——需要 multi-warp reduction（各 warp 先 local max，再 cross-warp reduce），或退回 block 版。head_dim=64/128 的小向量 softmax 常用 2~4 warp per row。
-]
-
-#note[
-  `__shfl_down_sync(0xffffffff, ...)` 的 mask 必须是参与 warp 的全部 active lane。如果有 divergence，mask 要按实际 ballot 结果设置——面试常考。
-]
-
-== v5: 向量化 load/store
-
-block kernel 的 grid-stride 循环可以向量化：每个 thread 一次读 `float4`（4 列），local max / local sum 在 4 个元素上展开。
-
-```cpp
-for (int col = threadIdx.x * 4; col < cols; col += blockDim.x * 4) {
-  if (col + 3 < cols) {
-    float4 v = reinterpret_cast<const float4*>(row_ptr)[col / 4];
-    local_max = fmaxf(local_max, fmaxf(fmaxf(v.x, v.y), fmaxf(v.z, v.w)));
-    // exp sum 同理，对 v.x..v.w 各算 expf(v.* - row_max)  — 在 row_max 已知后
-  } else {
-    // scalar 尾巴
-  }
-}
-```
-
-*注意顺序*：向量化 load 用在*第一轮 max reduction 之前*有效；sum 阶段需要已知 `row_max`，不能和 max 融合到同一次 vector load（除非缓存 4 个 float 到 register，等 max 出来再算 exp——寄存器压力上升）。
-
-收益：max pass 和 normalize pass 的 load 宽度 ×4，指令数下降。对 $C = 4096$ 的 memory-bound 场景，*理论上*可再提 10~20%——本章 benchmark 未覆盖 vectorized 版，需单独 profile。
-
-=== 寄存器缓存 exp 的 trade-off
-
-进阶做法：normalize pass 不重新读 global input，而在 max pass 时把每列 $x_i$ 缓存在 register / shared memory，max 出来后一次算 $exp(x_i - m)$，同时累加 sum 和写回。这样整行只读 global *一遍*——但 register 用量 $O(C / "threads")$，$C = 8192$ 时可能 occupancy 暴跌。CUTLASS / cuDNN 根据 $C$ 和 arch 在"2 pass + 低寄存器"和"1 pass + 高寄存器"之间 auto-tune。
-
-#insight[
-  softmax 的向量化比 vector add 更 tricky：中间有*跨全部元素的依赖*（max → sum → div）。只能向量化*无依赖的 load/store 阶段*，不能盲目 float4 整个 kernel。
-]
-
-== v6: fused softmax — mask、causal、scale
-
-训练框架里 softmax 很少单独出现——前面有 scale（除以 $sqrt(d)$），后面接 matmul $V$，中间有 padding mask / causal mask。能 fuse 的尽量 fuse，少写 global memory。
-
-=== masked softmax
-
-```cpp
-for (int col = 0; col < cols; ++col) {
-  if (mask_ptr[col] == 0) continue;
-  const float x = row_ptr[col];
-  const float new_row_max = fmaxf(row_max, x);
-  row_sum = row_sum * exp(static_cast<double>(row_max - new_row_max))
-            + exp(static_cast<double>(x - new_row_max));
-  row_max = new_row_max;
-}
-// 写回：mask=0 → 0，否则正常 normalize
-```
-
-mask=0 的位置*不参与* max/sum——等价于 $x = -oo$。输出置 0（不是 uniform），和 PyTorch `masked_fill(..., -inf)` 再 softmax 一致。
-
-源码 `softmax_masked_kernel` 完整结构：第一遍 online 循环 skip mask=0；第二遍写回时 mask=0 置 0。与 `softmax_online_kernel` 相比只多了 branch——*没有额外 global memory pass*。
-
-变长序列（NLP padding）时，不同 row 的有效长度不同，但 tensor 仍是矩形——mask 保证 padding 位不影响有效位的 softmax 归一化。若忘记 mask，padding 的 0 会参与 max（当有效位都是负数时 max 可能变成 0），attention 权重错误。
-
-=== scale 融合
-
-Attention logits：$x = (Q K^T) / sqrt(d)$。scale 可以在读入时乘，也可以 fuse 进 online 循环：
-
-```cpp
-const float x = row_ptr[col] * inv_sqrt_d;
-```
-
-fuse scale + softmax 成一个 kernel，避免写 scaled logits 到 global。FlashAttention 把 scale 合在 $Q K^T$ matmul 的 epilogue 里——更彻底的 fusion。
-
-=== causal kernel（源码对应）
-
-```cpp
-__global__ void softmax_causal_kernel(
-    const float* input, float* output, int rows, int cols) {
-  const int row = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row >= rows) return;
-
-  const float* row_ptr = input + row * cols;
-  float* out_ptr = output + row * cols;
-
-  float row_max = -INFINITY;
-  double row_sum = 0.0;
-  for (int col = 0; col <= row && col < cols; ++col) {
-    const float x = row_ptr[col];
-    const float new_row_max = fmaxf(row_max, x);
-    row_sum = row_sum * exp(static_cast<double>(row_max - new_row_max))
-              + exp(static_cast<double>(x - new_row_max));
-    row_max = new_row_max;
-  }
-
-  for (int col = 0; col < cols; ++col) {
-    out_ptr[col] = (col > row) ? 0.0f
-        : static_cast<float>(
-              exp(static_cast<double>(row_ptr[col] - row_max)) / row_sum);
-  }
-}
-```
-
-这里 `row` 既是 block 内的行索引，也是 causal 边界：query position $i$ 只能 attend 到 key position $j <= i$。future 位置直接写 0（不是 $-oo$ 再 exp——已经 out of softmax support）。
-
-#insight[
-  mask / causal / scale 三种 fusion 的共性：在 online 循环里*跳过*或*变换*输入，而不是先写中间 tensor 再读。每多一次 global round-trip，attention 端到端 latency 就多 ~5 μs + 带宽浪费。
-]
+#final-verdict(
+  status: [block 版本已经把 softmax 从 "1 SM 空转" 转成 "GPU 全部 SM 参与"，达到实用性能。],
+  note: [进一步优化的方向是 warp-per-row（rows 很小时用；见 05_layernorm 的 warp shuffle 版本），或者*和上下游算子融合*（softmax + logits →  attention 的 online 合并，见后续 FlashAttention 章节）。standalone softmax 到这里够用。]
+)
 
 == log-softmax 的数值考量
 
@@ -606,7 +489,7 @@ Cross-entropy loss：$cal(L) = -sum_i t_i log(y_i)$。若 $t$ 是 one-hot，只�
 
 推理量化（INT8/FP8）里 exp 表 + scale 是另一层近似——数值范围和校准 (calibration) 绑定。
 
-== 源码里的五个版本如何对应
+== 源码里的三个版本如何对应
 
 #figure(
   table(
@@ -614,20 +497,18 @@ Cross-entropy loss：$cal(L) = -sum_i t_i log(y_i)$。若 $t$ 是 one-hot，只�
     stroke: 0.5pt + gray,
     inset: 6pt,
     align: (left, left, left),
-    [*函数*], [*Launch*], [*用途*],
-    [`softmax_naive_kernel`], [`<<<ceil(rows/256), 256>>>`], [教学：CPU 逻辑直译],
-    [`softmax_block_kernel`], [`<<<rows, 256>>>`], [行内并行的标准模板],
-    [`softmax_online_kernel`], [`<<<ceil(rows/256), 256>>>`], [online 公式 + 少 pass],
-    [`softmax_masked_kernel`], [`<<<ceil(rows/256), 256>>>`], [padding / 变长序列],
-    [`softmax_causal_kernel`], [`<<<ceil(rows/256), 256>>>`], [decoder self-attention],
+    [*文件*], [*Launch*], [*用途*],
+    [`01_naive.cu`], [`<<<ceil(rows/256), 256>>>`], [教学：CPU 逻辑直译],
+    [`02_block.cu`], [`<<<rows, 256>>>`], [行内并行的标准模板],
+    [`03_online.cu`], [`<<<ceil(rows/256), 256>>>`], [online 公式 + 少 pass],
   ),
-  caption: [*Table:* 本章五个 kernel 函数及其 CUDA launch 配置与用途对照。*Launch* 列直接对应 `<<<grid, block>>>` 参数（`launch__grid_size` / `launch__block_size`）。`softmax_block_kernel` 唯一采用 `<<<rows, 256>>>`（一行一 block）；其余四版用 `<<<ceil(rows/256), 256>>>` grid-stride 覆盖多行。],
+  caption: [*Table:* 本章三个 kernel 文件及其 CUDA launch 配置与用途对照。*Launch* 列直接对应 `<<<grid, block>>>` 参数（`launch__grid_size` / `launch__block_size`）。`02_block.cu` 唯一采用 `<<<rows, 256>>>`（一行一 block）；其余两版用 `<<<ceil(rows/256), 256>>>` grid-stride 覆盖多行。],
   kind: table,
 )
 
-*Observation*：launch 配置揭示了并行粒度差异——block 版 grid 维 = rows，每 block 256 thread 协作归约*一行*；其余版本 grid-stride 让每 block 处理多行，grid 更小但每 thread 串行更多行。masked / causal 在 compute 路径上与 naive 相同，差异在*哪些元素参与 max/sum*（mask / 三角约束），不是 reduction 结构本身。
+*Observation*：launch 配置揭示了并行粒度差异——block 版 grid 维 = rows，每 block 256 thread 协作归约*一行*；其余版本 grid-stride 让每 block 处理多行，grid 更小但每 thread 串行更多行。
 
-运行：`make build/03_softmax && ./build/03_softmax`。默认 $64 times 257$，causal 用 $64 times 64$。所有版本与 CPU reference 对齐，容差 $10^(-4)$。默认 $64 times 257$，causal 用 $64 times 64$。所有版本与 CPU reference 对齐，容差 $10^(-4)$。
+运行：`make build/03_softmax/02_block && ./build/03_softmax/02_block`。默认 $64 times 257$。GPU 输出与 CPU reference 对齐，容差 $10^(-4)$。
 
 == 从本章到 FlashAttention 的衔接
 
@@ -656,9 +537,9 @@ Cross-entropy loss：$cal(L) = -sum_i t_i log(y_i)$。若 $t$ 是 one-hot，只�
 
 == 实测
 
-$"rows" = 64, "cols" = 257$（input + output 各约 66 KB，整 tensor < 132 KB；causal 用 $64 times 64$），A100 80GB SXM4，`ncu --set full` 抓取每个 kernel 的一次 launch。GB/s 列写作 *HBM 实测 / 逻辑*：前者 `dram__bytes.sum / time`，后者按各版本 pass 数估算的理论搬运量。
+$"rows" = 64, "cols" = 257$（input + output 各约 66 KB，整 tensor < 132 KB），A100 80GB SXM4，`ncu --set full` 抓取每个 kernel 的一次 launch。GB/s 列写作 *HBM 实测 / 逻辑*：前者 `dram__bytes.sum / time`，后者按各版本 pass 数估算的理论搬运量。
 
-$ceil(64 / 256) = 1$——naive / online / masked / causal 的 grid 都是 $(1, 1, 1)$，256 thread 里只有 64 个处理行；block 版 `#raw("<<<rows, 256>>>")` 的 grid 是 $(64, 1, 1)$。
+$ceil(64 / 256) = 1$——naive / online 的 grid 都是 $(1, 1, 1)$，256 thread 里只有 64 个处理行；block 版 `#raw("<<<rows, 256>>>")` 的 grid 是 $(64, 1, 1)$。
 
 #include "../bench/03_softmax.typ"
 
@@ -675,18 +556,14 @@ $ceil(64 / 256) = 1$——naive / online / masked / causal 的 grid 都是 $(1, 
 
 + *online 比 naive 慢 2.1×*。252.29 μs vs 120.80 μs——两者 `SM %` 都是 0.9%（仍是单 block）；Pass 1 每步可能 `exp(m_"old" - m_"new")` 重标定，MUFU 比 naive 三 pass 的"先 max 再 bulk exp"更碎。
 
-+ *masked 最慢：436.35 μs*。比 naive 慢 3.6×——在 online 循环上叠加 mask tensor 读和 `if (mask==0)` predication；causal 46.50 μs 不能和 masked 直接比绝对时间（shape $64 times 64$ vs $64 times 257$，且内层只扫 `col <= row`）。
-
 *HBM % 全表 ≈ 0，`% peak` 无诊断价值*——132 KB 工作集在 L2 内，block 版逻辑 GB/s 2197 超过 HBM peak 2039 是*分母过小*的假象，不是真的打满带宽。
 
 #figure(
   hbar-chart(
     (
       ("block", 5.73),
-      ("causal", 46.50),
       ("naive", 120.80),
       ("online", 252.29),
-      ("masked", 436.35),
     ),
     unit: "μs",
   ),
@@ -699,20 +576,10 @@ $ceil(64 / 256) = 1$——naive / online / masked / causal 的 grid 都是 $(1, 
 
 *b) block：`pred_on/32 = 21.4`，`issued/32 = 31.1`*。issued − pred_on = 9.7 来自 grid-stride 尾部和 reduction 树里 `if (tid < offset)` 的 predicated-off lane——*不是* warp divergence（不同 basic block），因为 `issued/32` 仍近 32。`barrier stall = 2.43` 是两次 smem tree 的 `__syncthreads` 成本；`smem conf. = 0`，*不能*从源码推断 bank conflict，metric 说没有。
 
-*c) masked：`issued/32 = 26.3`，`pred_on/32 = 25.9`*。issued − pred_on 仅 0.4——`if (mask==0) continue` 是 predication，predicated-off lane 占 issue slot 但不做 exp 更新；`mem stall = 9.71` 是全表最高（额外 mask 读 + MUFU），kernel 太短不足以解读为 memory-bound。
-
-#figure(
-  warp-lanes(active: range(26), cell: 0.32,
-             title: "masked：平均 pred_on/32 = 25.9，约 26 条 lane 在做有效 work"),
-  caption: [绿色 = predicated-on lane；灰色 = predicated-off 或 idle。gap 在 issued − pred_on，不是分支 divergence。],
-)
-
-*d) causal：`issued/32 = 22.7`，`pred_on/32 = 22.4`*。低于 32 因为 `col <= row` 和 `col > row` 写 0 都是 predicated 路径；`mem stall = 1.70` 低于 masked，和更小矩阵 + 约半量扫描一致。
-
 *无信息或为零的 metric：*
 
 - `smem conf.`：除 block 外均为 0（无 smem）；block 也是 0——本规模下 sequential tree 未累积到可测 bank conflict。
-- `barrier stall`：naive / online / masked / causal 均为 0.00——单 thread 路径无 sync，*符合预期*。
+- `barrier stall`：naive / online 均为 0.00——单 thread 路径无 sync，*符合预期*。
 - `HBM %`、`% peak`：全表 ≈ 0——小规模 L2 resident，*不要用来论输赢*。
 
 #insight[
@@ -726,7 +593,7 @@ $ceil(64 / 256) = 1$——naive / online / masked / causal 的 grid 都是 $(1, 
 == ncu 该看什么
 
 ```
-ncu --set full --section SpeedOfLight ./build/03_softmax
+ncu --set full --section SpeedOfLight ./build/03_softmax/bench
 ```
 
 关键 metric：
@@ -740,9 +607,9 @@ ncu --set full --section SpeedOfLight ./build/03_softmax
 
 - *naive vs block*：`time` 120.80 μs → 5.73 μs（21×）；`SM %` 0.9% → 36.6%。HBM 实测 GB/s 1 vs 13——L2 吃掉 3 pass 重复读，不能从这里得出"访存减半"。
 - *online vs naive*：`time` 252.29 μs vs 120.80 μs（online 更慢）；Pass 少了，但 per-step exp 重标定让 MUFU 更忙——看 `smsp__sass_thread_inst_executed_op_mufu` 占比，online 往往*更高*而非更低。
-- *grid 列*：`launch__grid_size` naive/online/masked/causal = 1，block = 64。若 `SM %` < 5%，先查 grid 是不是只有 1 block，再查算法。
+- *grid 列*：`launch__grid_size` naive/online = 1，block = 64。若 `SM %` < 5%，先查 grid 是不是只有 1 block，再查算法。
 
-放大规模后重跑：`ncu -k regex:softmax --launch-count 3 ./build/03_softmax`，把 rows 改到 $8192+$、cols 改到 $4096+$，HBM % 才会上来，dram 对比才有意义。
+放大规模后重跑：`ncu -k regex:softmax --launch-count 3 ./build/03_softmax/bench`，把 rows 改到 $8192+$、cols 改到 $4096+$，HBM % 才会上来，dram 对比才有意义。
 
 == 面试白板 code
 
@@ -850,9 +717,9 @@ softmax_online<<<B, block>>>(x, y, N);
 ]
 
 #interview[
-  *Q5*: warp-per-row softmax 怎么做两次 reduction？
+  *Q5*: 当行宽 $C <= 32$ 时，softmax 里两次 reduction 怎么用 warp shuffle 做？
 
-  A: 每 lane 持一列，shuffle down 做 max（5 步）；各 lane 算 exp，再 shuffle down 做 sum；lane 写回。零 smem，$C <= 32$ 最优。
+  A: 每 lane 持一列，`__shfl_down_sync` 做 max（5 步）；各 lane 算 exp，再 shuffle down 做 sum；lane 写回。零 smem、零 barrier，$C <= 32$ 最优。$C > 32$ 时要 multi-warp 或回到 block 版。
 ]
 
 #interview[

@@ -8,11 +8,11 @@ matrix multiply 是 GPU kernel 优化的*终极试金石*。vector add 的 naive
 
 - GEMM 的数学定义、存储布局、以及为什么它是 compute-bound 的经典例子。
 - Roofline 分析：AI 如何从 naive 的 $O(1)$ 随 tile 增大而爬升。
-- 从 naive → shared memory tile → warp tile → register tile → pipeline 的完整 ladder（对应源码五个 kernel）。
-- 源码里没有单独写、但面试必问的：`float4` 向量化、`cp.async` 双缓冲、tensor core fragment 布局、bank conflict swizzle、CUTLASS 分层、split-K。
+- 从 cuBLAS baseline → naive miscoalesced → coalesced → SMEM tile → 1D/2D register tile → float4 vectorized → MMA PTX → WMMA 的 9 级 ladder（对应源码 K0–K8）。
+- 源码里没写全但面试必问的：`cp.async` 多 stage pipeline、bank conflict swizzle、CUTLASS 4 层 tile 分解、split-K、Hopper WGMMA/TMA。
 - 怎么选 tile 大小、怎么用 ncu 诊断、cuBLAS 为什么快。
 
-对应源码：`src/cuda/04_matmul.cu`。
+对应源码：`src/cuda/04_matmul/{00_cublas,01_naive_miscoalesced,02_naive_coalesced,03_smem_tiled,04_block_tile_1d,05_block_tile_2d,06_vectorized,07_mma_ptx,08_wmma}.cu`。
 
 == 问题定义
 
@@ -89,21 +89,26 @@ $ "AI"_"tiled" approx frac(2 B_M B_N B_K, 4(B_M B_K + B_K B_N)) = frac(B_M B_N, 
 
 === 性能 ladder 概览
 
-$M = N = K = 4096$，A100 FP32，相对 cuBLAS 的粗略比例（教学实测，具体数字因 GPU/driver 版本略有出入）：
+本章 ladder 有 9 个版本 (K0–K8)，都在 A100 SXM4-80GB 上、$M = N = K = 2048$ 实测：
 
 #ladder(
-  ("naive",              "1 thread / output",                    "~1%"),
-  ("shared-memory tile", "16×16 smem tile",                      "~5%"),
-  ("warp tile",          "8 warps × 2 outputs/lane",             "~15%"),
-  ("register tile",      "2×2 thread tile",                      "~25%"),
-  ("+ vectorized load",  "float4 global→smem",                   "~35%"),
-  ("+ swizzle + cp.async","bank-free + pipeline",                "~55%"),
-  ("tensor core WMMA",   "m16n8k16 mma.sync",                    "~85%"),
-  ("cuBLAS",             "years of tuning + split-K + ...",      "100%"),
+  ("K0 cuBLAS",             "vendor lib, TF32 tensor core",       "83.2 TFLOPS  (100%)"),
+  ("K1 naive miscoalesced", "row/col 映射反了",                    "0.47 TFLOPS  (0.6%)"),
+  ("K2 naive coalesced",    "swap tid.x/tid.y",                   "2.58 TFLOPS  (3.1%)"),
+  ("K3 SMEM tiled",         "16×16 smem tile",                    "3.85 TFLOPS  (4.6%)"),
+  ("K4 block tile 1D",      "每 thread 8×1 register 列",           "7.84 TFLOPS  (9.4%)"),
+  ("K5 block tile 2D",      "每 thread 2×2 register 块",           "7.67 TFLOPS  (9.2%)"),
+  ("K6 vectorized",         "float4 load + 4×4 register tile",    "11.7 TFLOPS  (14%)"),
+  ("K7 MMA PTX",            "mma.sync m16n8k16, FP16→FP32",       "14.6 TFLOPS  (18%)"),
+  ("K8 WMMA",               "nvcuda::wmma fragment, FP16→FP32",   "19.1 TFLOPS  (23%)"),
 )
 
 #warn[
-  上表是*量级参考*，不是精确 benchmark。本书源码的 ladder 停在 pipeline teaching 版（scalar FMA），目的是读懂结构，不是和 cuBLAS 赛跑。真正追 peak 需要 tensor core + 完整 pipeline + 专业 tuning。
+  这是*真·实测*，不是估算。K1→K2 78×、K2→K3 1.7×、K3→K4 2.0×、K6→K7 1.24×、K7→K8 1.31×——每一级都能在 ncu 里看到直接原因。K8 的 19 TFLOPS 打满了 A100 的 FP32 CUDA-core 峰值 (19.5 TFLOPS)，但离 TF32 tensor core (156 TFLOPS) 还差 8×、离 FP16 tensor core (312 TFLOPS) 差 16×——这个 gap 来自本章*没写*的东西：更大的 warp tile、`cp.async` pipeline、swizzled smem、CUTLASS-式 warp specialisation。这些在 Hopper 上被 WGMMA + TMA 打包成 K9–K12（章末讨论，本章 A100 编不了）。
+]
+
+#note[
+  K0 cuBLAS 是一个特殊的 baseline：它不是"下一版"，而是*天花板*。K1 起是我们从最坏的写法开始爬。K4/K5 的 TFLOPS 几乎相同（一维 vs 二维 register tile）——这说明*ladder 上不是每一级都必然提速*，把两者都放进来是为了让你在 ncu 里看清 "为什么 2D 不再赢"。
 ]
 
 === 手算一遍：tile 如何把 AI 从 0.25 拉到 32
@@ -128,485 +133,575 @@ $M = N = K = 4096$，A100 FP32，相对 cuBLAS 的粗略比例（教学实测，
 
 Linear layer：`Y = X @ W^T + b`，本质是 GEMM。Attention 里的 $Q K^T$ 和 $ "softmax" @ V $ 也是 GEMM（或 batched GEMM）。Optimizer 里的 weight update 同样。可以说：*把 GEMM 优化到极致，就覆盖了 LLM 推理/训练的大头算力*。FlashAttention 的 clever 之处在于它*不是*标准 GEMM——通过 online softmax 避免了 materialize 完整的 $S times S$ 矩阵——但 $Q K^T$ 和 $P V$ 的子问题仍然是 GEMM 结构。
 
-== v1: naive
+== K0: cuBLAS baseline
+
+先看天花板。cuBLAS 在 A100 上跑 FP32 GEMM 会自动 dispatch 到基于 CUTLASS 的 TF32 tensor core kernel——即使你传的是 FP32 输入，只要 math mode 打开就走 tensor core。
 
 ```cpp
-__global__ void matmul_naive_kernel(
-    const float* a, const float* b, float* c,
-    int m, int n, int k) {
-  const int row = blockIdx.y * blockDim.y + threadIdx.y;
-  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+static cublasHandle_t handle = nullptr;
+if (!handle) {
+    cublasCreate(&handle);
+    cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+}
+const float alpha = 1.f, beta = 0.f;
+// 关键：cuBLAS 是 column-major。行主序的 A @ B 用 (A B)^T = B^T A^T 变换成
+//       cublasSgemm(handle, N, N, n, m, k, α, B, n, A, k, β, C, n)
+cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+            n, m, k,
+            &alpha,
+            b, n,   // 行主序 B 在 column-major 里的 leading dim
+            a, k,
+            &beta,
+            c, n);
+```
 
-  if (row >= m || col >= n) return;
+*不要试着从这份代码里学 GEMM 结构*——cuBLAS 内部一个 kernel 可能有几百 KB PTX、按 shape 动态选算法（persistent、split-K、stream-K）、warp specialise、TMA 分层……我们只把它当成"实测天花板"来看。
 
-  float acc = 0.0f;
-  for (int inner = 0; inner < k; ++inner) {
-    acc += a[row * k + inner] * b[inner * n + col];
-  }
-  c[row * n + col] = acc;
+#ncu-snapshot(
+  version: "K0 cuBLAS",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "206 µs",  "17.2 GFLOP / 0.207 ms = 83.2 TFLOPS"),
+    ("Compute (SM) SOL",     "65.9 %",  "TF32 tensor pipe 忙碌"),
+    ("Memory SOL",           "46.9 %",  "HBM 也在跑，但不占主导"),
+    ("L2 Hit Rate",          "81.1 %",  "cuBLAS 会重排 grid 让相邻 CTA 共享 L2 line"),
+    ("Registers / thread",   "230",     "巨大——production kernel 疯狂占寄存器换 ILP"),
+    ("Achieved Occupancy",   "6.2 %",   "低到反直觉：230 reg × 128 thread ≈ 30k reg / SM，一个 block 就吃掉大半 SM"),
+  ),
+)
+
+*两个反直觉的读数*：
+
+- *Occupancy 只有 6%——却是全表最快*。这打破了"高 occupancy = 高性能"的直觉。cuBLAS 用大量寄存器保存 warp 内的 accumulator tile（可能是 $128 times 128$ / warp 级），代价是每 SM 只能塞 1–2 个 block。这些少数 warp 通过 register-level 的 ILP + tensor core 打满 SM 的算力——不需要多 warp 靠切换掩盖 latency。
+- *Memory SOL 47% + Compute SOL 66%*：production GEMM 的典型形状——同时在算和搬，没有一头空。tile 够大让 HBM 传的每个 byte 都被复用几百次；同时 warp 数够多让 tensor pipe 不饿。
+
+#verdict(
+  problem: [这是天花板，不是"要修的问题"。它的存在只为回答一个问题：*我们手写的能到 cuBLAS 的多少 %？*],
+  evidence: [83.2 TFLOPS / 156 TFLOPS TF32 peak $approx$ 53%。cuBLAS 内部也没打满硬件，因为 GEMM 在 shape=2048 上还没到"大到 grid 完全稳态"的规模（108 SM × 82 waves 才能"warm up"）。],
+  next: [从 ladder 的最底部开始爬。K1 故意写错，让你直接看到 coalescing 的 78×代价。]
+)
+
+== K1: naive miscoalesced（故意错的起点）
+
+```cpp
+// row/col 的映射反了：threadIdx.x 沿行走，threadIdx.y 沿列走
+__global__ void matmul_kernel(const float* a, const float* b, float* c,
+                              int m, int n, int k) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;   // <-- 反了
+    const int col = blockIdx.y * blockDim.y + threadIdx.y;   // <-- 反了
+    if (row >= m || col >= n) return;
+    float acc = 0.f;
+    for (int inner = 0; inner < k; ++inner)
+        acc += a[row * k + inner] * b[inner * n + col];
+    c[row * n + col] = acc;
 }
 ```
 
-Launch：`block(16, 16)`，`grid(ceil(n/16), ceil(m/16))`。一个 thread 负责 `C[row, col]` 一个输出。
+*看似正确*——每个 thread 算一个 $C[i, j]$，数学没错。但 warp 内 `threadIdx.x = 0..31` 的 32 个 lane，`col` 是同一个值（因为 col 来自 threadIdx.y），`row` 才不同。它们同时访问 `b[k, col]`——32 个 lane 读*同一个* col 的 32 个不同行。
 
-=== 三个致命问题
+*后果*：一个 warp 对 B 的读变成 32 次独立 transaction（stride $N$ 访问），而不是 1 次 128 B coalesced。写回 `c[row, col]` 同理。所有 lane 都会串行走 32 个 memory cycle。
 
-*1. 零数据复用*
+#ncu-snapshot(
+  version: "K1 miscoalesced",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "36.9 ms",  "比 K0 慢 179×"),
+    ("Memory SOL",           "99.2 %",   "HBM 打满了——但传的都是 *strided 垃圾*"),
+    ("Compute (SM) SOL",     "11.7 %",   "SM 大多数时间在等 memory"),
+    ("L1/TEX Hit Rate",      "97.1 %",   "反直觉：hit rate 极高！"),
+    ("Memory Throughput",    "1.52 GB/s","HBM 峰值 2 TB/s，实际吞吐差 1300×"),
+    ("Achieved Occupancy",   "97.8 %",   "warp 是满的，但都在等 load 完成"),
+  ),
+)
 
-同一个 block 里，相邻 thread 读 $A$ 的*同一行*但 $B$ 的*不同列*。`A[row, :]` 被 16 个 thread 各读一遍（本来可以 1 遍）。$B$ 同理——`B[:, col]` 被 16 个 thread 各读一遍。
+*关键读数解释*：
 
-一个 $16 times 16$ block 本可以协作读 $16 times 16$ 的 $A/B$ 子块各一次，naive 却读了 $16 times (16 + 16) = 512$ 次（每个元素被 16 个 thread 重复读）。
+- *Memory SOL 99% 但吞吐 1.5 GB/s*：SOL 是"发出去的 transaction 占硬件峰值的比例"，跟"传了多少 byte"是两码事。miscoalesced 访问让每个 128 B transaction 里只有 4 B 是"想要的"（1/32 效率），剩下 124 B 被 GPU 传上来又扔掉。
+- *L1 hit 97%*：这是最反直觉的一条——多个连续的 warp 对 B 同一列的重叠访问，让 L1 cache 意外 hit 得很好，但 hit 之后每次还是要发一次 request 才能拿到需要的 4 B。cache 帮了忙，但没解决"发太多 request"这个根本问题。
 
-*2. $B$ 的访问不合并*
+#verdict(
+  problem: [坐标映射把*快变化 dim*（threadIdx.x）放到了*慢变化维度*（row），warp 内每个 lane 访问不同 128 B cache line。],
+  evidence: [Memory SOL 99% + 实际吞吐 1.52 GB/s（HBM 峰值 2 TB/s 的 0.07%）——SM 忙于发 32× 冗余 transaction。],
+  next: [swap `threadIdx.x` ↔ `threadIdx.y`，让 lane 沿 col 走。一行代码。]
+)
 
-`A[row * k + inner]`：固定 `row`，`inner` 递增——连续访问，合并 ✓。
+== K2: naive coalesced
 
-`B[inner * n + col]`：固定 `col`，`inner` 递增——stride = $N times 4$ B。一个 warp 里 32 个 thread 的 `col` 连续，但 `inner` 相同时访问地址间隔 $N times 4$ B。当 $N >= 32$ 时，32 个 lane 的地址跨整个矩阵宽度——*完全不合并*，32 个独立 transaction。
+```cpp
+__global__ void matmul_kernel(const float* a, const float* b, float* c,
+                              int m, int n, int k) {
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;   // 换回来
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;   // 换回来
+    if (row >= m || col >= n) return;
+    float acc = 0.f;
+    for (int inner = 0; inner < k; ++inner)
+        acc += a[row * k + inner] * b[inner * n + col];
+    c[row * n + col] = acc;
+}
+```
 
-*3. 无 latency hiding*
+*一行改动*（其实是两行的 swap）。现在 warp 内 32 lane 的 `col` 依次递增、`row` 相同。它们访问 `b[k, col..col+31]`—— 32 个连续 float = 128 B，一次 coalesced transaction。
 
-每个 thread 独立做 $K$ 次串行 load + FMA。一个 block 只有 256 个 thread，对于 $K = 4096$ 来说，memory latency 完全暴露。
+#ncu-snapshot(
+  version: "K2 coalesced",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "6.66 ms",  "比 K1 快 5.5×"),
+    ("Memory SOL",           "97.6 %",   "HBM 还是打满，但这次每 byte 都有用"),
+    ("Compute (SM) SOL",     "65.0 %",   "从 11% 跳到 65%——SM 真在算了"),
+    ("Memory Throughput",    "8.24 GB/s","仍然远低于 HBM 峰值——见下 verdict"),
+    ("L1/TEX Hit Rate",      "87.5 %",   "L1 帮着 dedupe 相邻 warp 的重复 A 读"),
+    ("Achieved Occupancy",   "98.3 %",   ""),
+  ),
+)
 
-#note[
-  naive GEMM 的价值是*建立正确性直觉*：输出矩阵每个元素 = $A$ 的一行 · $B$ 的一列。优化 ladder 的每一步都是在不改变这个数学的前提下，减少冗余读取、改善访问模式、提高计算密度。
-]
+*一个访问模式改动 5.5×*。但注意 Duration 还是 6.66 ms、TFLOPS 只有 2.58——离 K0 的 83 TFLOPS 还差 32 倍。原因见 verdict：coalescing 是"访问模式正确"，但仍然*没有复用*。
 
-== v2: shared memory tiling
+#verdict(
+  problem: [每个 $C[i,j]$ 需要读 $2K = 4096$ 个 float 才算一次结果，*每个 $A$/$B$ 元素只服务 1 个输出*——AI $approx$ 0.25，重度 memory-bound。],
+  evidence: [Memory SOL 97.6% 且实际吞吐 8.24 GB/s（比 K1 高 5.4×）——HBM 用足了，但传输量本身仍然是"每 FMA 8 B"。TFLOPS 只有 2.58 / 19.5（CUDA-core FP32 peak）$approx$ 13%。],
+  next: [引入 shared memory：一个 block 里 256 个 thread 协作读一次 tile，然后每个 tile 被复用 tile-size 次。AI 从 0.25 → tile-size / 2。]
+)
+
+== K3: SMEM tiled
 
 ```cpp
 constexpr int kTile = 16;
-
-__global__ void matmul_tiled_kernel(
-    const float* a, const float* b, float* c,
-    int m, int n, int k) {
-  __shared__ float a_tile[kTile][kTile];
-  __shared__ float b_tile[kTile][kTile];
-
-  const int row = blockIdx.y * kTile + threadIdx.y;
-  const int col = blockIdx.x * kTile + threadIdx.x;
-  float acc = 0.0f;
-
-  for (int tile_k = 0; tile_k < k; tile_k += kTile) {
-    const int a_col = tile_k + threadIdx.x;
-    const int b_row = tile_k + threadIdx.y;
-
-    a_tile[threadIdx.y][threadIdx.x] =
-        (row < m && a_col < k) ? a[row * k + a_col] : 0.0f;
-    b_tile[threadIdx.y][threadIdx.x] =
-        (b_row < k && col < n) ? b[b_row * n + col] : 0.0f;
-
-    __syncthreads();  // ① load 完成，才能读 smem
-
-    #pragma unroll
-    for (int inner = 0; inner < kTile; ++inner) {
-      acc += a_tile[threadIdx.y][inner] * b_tile[inner][threadIdx.x];
+__global__ void matmul_kernel(const float* a, const float* b, float* c,
+                              int m, int n, int k) {
+    __shared__ float a_tile[kTile][kTile];
+    __shared__ float b_tile[kTile][kTile];
+    const int row = blockIdx.y * kTile + threadIdx.y;
+    const int col = blockIdx.x * kTile + threadIdx.x;
+    float acc = 0.f;
+    for (int tile_k = 0; tile_k < k; tile_k += kTile) {
+        a_tile[threadIdx.y][threadIdx.x] = a[row * k + tile_k + threadIdx.x];
+        b_tile[threadIdx.y][threadIdx.x] = b[(tile_k + threadIdx.y) * n + col];
+        __syncthreads();
+#pragma unroll
+        for (int inner = 0; inner < kTile; ++inner)
+            acc += a_tile[threadIdx.y][inner] * b_tile[inner][threadIdx.x];
+        __syncthreads();
     }
-
-    __syncthreads();  // ② compute 完成，才能覆写 smem
-  }
-
-  if (row < m && col < n) {
     c[row * n + col] = acc;
-  }
 }
 ```
 
-=== 核心思想
+现在每个 block 有 $16 times 16 = 256$ 个 thread，协作把 $A$ 的一行 tile（$16 times 16 = 256$ float）和 $B$ 的一列 tile 搬进 smem。然后每个 thread 用 smem 里的数据做 16 次乘加。K 维度分 $K / 16 = 128$ 个 slab。
 
-沿 $K$ 维度分块。每次循环：
+*AI 分析*：一个 tile 从 HBM 读 $2 times 16 times 16 = 512$ float = 2048 B，产出 $16 times 16 = 256$ 个中间结果 $times 16$ 次 FMA/结果 = 4096 FMA = 8192 FLOP。$"AI" = 8192 / 2048 = 4$ FLOP/B。*理论上应该跳出 memory-bound*（A100 ridge $approx$ 13 FLOP/B，还差一点，但比 K2 的 0.25 强 16×）。
 
-1. 协作把 `A[row:row+16, tile_k:tile_k+16]` 和 `B[tile_k:tile_k+16, col:col+16]` 搬进 shared memory。
-2. 256 个 thread 在 smem 里做 $16 times 16$ 的小矩阵乘——每个 $A/B$ 元素被 16 个 thread 复用。
-3. `tile_k += 16`，推进到下一个 $K$ slab。
+#ncu-snapshot(
+  version: "K3 SMEM tiled",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "4.46 ms",  "比 K2 快 1.5×"),
+    ("Memory SOL",           "93.6 %",   "HBM 还在打——tile 只有 16，复用不够"),
+    ("Compute (SM) SOL",     "72.8 %",   "SM 更忙了"),
+    ("L1/TEX Hit Rate",      "2.5 %",    "为什么这么低？见下"),
+    ("L2 Hit Rate",          "98.1 %",   "所有相邻 block 都在读相同 tile"),
+    ("Registers / thread",   "32",       "还是很轻——每 thread 只有 1 个 acc"),
+  ),
+)
 
-=== BM×BK tile 与 K 维度分块
+*两个问题需要解释*：
 
-记 $B_M = B_N = B_K = 16$（本书用方阵 tile 简化讲解；生产代码 $B_M, B_N, B_K$ 通常不相等，比如 $128 times 256 times 16$）。
+- *L1 hit rate 从 K2 的 87.5% 掉到 2.5%*：现在 A 和 B 的 tile 大部分时间是在 shared memory 里读的，走 SMEM 路径*不经过 L1*，所以 L1 counter 分母变了。这不是坏事——真正的问题是 HBM 用量还高。
+- *HBM SOL 还有 93.6%*：tile-16 太小。每个 block 从 HBM 读 $2 times 16^2 times 128 "slabs" = 65 "KB"$，只算出 $16 times 16 = 256$ 个输出。摊到每输出 260 B 读——比 K2 的 8 KB 少多了，但离"每输出 20 B 以内"（TF-32 tensor core 需要）还差一大截。
 
-- `a_tile[ty][tx]`：thread `(ty, tx)` 搬 `A[row, tile_k + tx]`。
-- `b_tile[ty][tx]`：thread `(ty, tx)` 搬 `B[tile_k + ty, col]`。
+#verdict(
+  problem: [Tile 只有 16 × 16，*每个 SMEM 值只被复用 16 次*。有效 AI 只有 4 FLOP/B，仍在 roofline 的 memory-bound 区。],
+  evidence: [HBM SOL 93.6% + 每输出 260 B HBM 读取。TFLOPS 3.85 / 19.5 peak = 20%。],
+  next: [把 tile 做大——但 tile 越大占的 SMEM 越多。真正的解药是 *register tiling*：让每个 thread 算多个输出，让同一个 SMEM 值服务多个 acc。]
+)
 
-内层循环 `inner = 0..15`：thread `(ty, tx)` 读 `a_tile[ty][inner]`（$A$ 的第 `ty` 行）和 `b_tile[inner][tx]`（$B$ 的第 `tx` 列），做外积累加。
+== K4: 1D block tile（每 thread 一列 8 输出）
 
-=== `__syncthreads` 的两个位置
+第一次 register-blocking。每个 block 有 $64 times 8 = 512$ 个 thread，覆盖一个 $64 times 64$ 输出 tile；每个 thread 拥有*一列 8 个输出*的 register 累加器。
 
-*同步 ①*（load 后、compute 前）：所有 thread 必须完成 smem 写入，才能开始读取。缺少它 → 读到未初始化数据 → 结果错误。
+```cpp
+constexpr int kBlockTileM = 64, kBlockTileN = 64, kBlockTileK = 8;
+constexpr int kThreadTileM = 8;                        // 每 thread 拥有 8 行
+constexpr int kThreadsX = 64;                          // 沿 N 方向 64
+constexpr int kThreadsY = kBlockTileM / kThreadTileM;  // 沿 M 方向 8
 
-*同步 ②*（compute 后、下一轮 load 前）：所有 thread 必须用完当前 smem 数据，才能覆写。缺少它 → 慢 thread 还在读 `a_tile[ty][inner]`，快 thread 已经开始写下一轮 → 数据竞争。
+__global__ void matmul_kernel(const float* a, const float* b, float* c,
+                              int m, int n, int k) {
+    __shared__ float a_tile[kBlockTileM][kBlockTileK];
+    __shared__ float b_tile[kBlockTileK][kBlockTileN];
+    const int tx = threadIdx.x, ty = threadIdx.y;
+    const int col = blockIdx.x * kBlockTileN + tx;
+    const int row_base = blockIdx.y * kBlockTileM + ty * kThreadTileM;
+    float acc[kThreadTileM] = {};
+
+    for (int tile_k = 0; tile_k < k; tile_k += kBlockTileK) {
+        /* cooperative load: 512 thread 各搬一个 float 填 A(64×8) 和 B(8×64) */
+        __syncthreads();
+
+#pragma unroll
+        for (int inner = 0; inner < kBlockTileK; ++inner) {
+            // *关键*：b_frag 从 SMEM 加载 1 次，被 8 个 acc 复用！
+            const float b_frag = b_tile[inner][tx];
+#pragma unroll
+            for (int i = 0; i < kThreadTileM; ++i) {
+                acc[i] += a_tile[ty * kThreadTileM + i][inner] * b_frag;
+            }
+        }
+        __syncthreads();
+    }
+    /* 写回 8 个 acc 到 c[row_base..row_base+7][col] */
+}
+```
+
+*为什么快*：内层 K 循环里，`b_frag = b_tile[inner][tx]` 从 SMEM 读一次（共 `kBlockTileK = 8` 次 per K-slab），然后被 8 个 FMA 用掉。SMEM load 数量减少 8×，同时 acc 一直待在寄存器里。
+
+#ncu-snapshot(
+  version: "K4 block tile 1D",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "2.19 ms",   "比 K3 快 2.0×，比 K2 快 3.0×"),
+    ("Memory SOL",           "73.2 %",    "HBM 使用率*下降*——AI 上来了"),
+    ("Compute (SM) SOL",     "50.9 %",    ""),
+    ("Registers / thread",   "58",        "从 32 涨到 58——8 个 acc + 索引变量"),
+    ("Achieved Occupancy",   "47.7 %",    "reg 用得多，warp 数减半——但更快"),
+    ("Memory Throughput",    "34.8 GB/s", "从 K3 的 12 GB/s 涨到 35——tile 更大，需要的 HBM 也更多"),
+  ),
+)
+
+*两个重要转折*：
+
+- *Occupancy 从 98% 跌到 48%——但更快*。这是 K0 那个反直觉观察的第一次微缩预告：register pressure 换 ILP。8 个 register acc 让编译器在内层 8-FMA 循环里做深度指令调度、pipeline，实际 IPC 比双倍 warp 还高。
+- *HBM SOL 从 K3 的 94% 掉到 73%*——不是因为 HBM 变慢，而是 SM 花更多时间在算 FMA、等 HBM 不再是瓶颈。这是"往 compute-bound 移动"的第一次视觉证据。
+
+#verdict(
+  problem: [1D register tile 只在 M 方向复用（`b_frag` 服务 8 个 a_frag），*N 方向仍是每 acc 独立 SMEM read*。],
+  evidence: [Compute SOL 50.9% 说明 SM 有一半时间在等——K 循环里 SMEM load 还是 8 个 a_frag + 1 个 b_frag = 9 loads per 8 FMA，SMEM bandwidth 卡住。],
+  next: [做 2D tile：每 thread 拥有 $2 times 2$ 输出，让 SMEM 值在 M 和 N 两个方向都复用。]
+)
+
+== K5: 2D block tile（每 thread 2×2 输出）
+
+```cpp
+constexpr int kBlockTileM = 32, kBlockTileN = 32, kBlockTileK = 16;
+constexpr int kThreadTileM = 2, kThreadTileN = 2;
+
+for (int inner = 0; inner < kBlockTileK; ++inner) {
+    const float a_f0 = a_tile[ty * 2 + 0][inner];
+    const float a_f1 = a_tile[ty * 2 + 1][inner];   // A frag: 2 loads
+    const float b_f0 = b_tile[inner][tx * 2 + 0];
+    const float b_f1 = b_tile[inner][tx * 2 + 1];   // B frag: 2 loads
+    acc[0][0] += a_f0 * b_f0;   acc[0][1] += a_f0 * b_f1;
+    acc[1][0] += a_f1 * b_f0;   acc[1][1] += a_f1 * b_f1;
+}
+```
+
+现在 SMEM 每 iteration 读 4 个值（2 A + 2 B），做 4 次 FMA——每 SMEM load 对应 1 个 FMA。相比 K4 的 9 loads / 8 FMA（≈ 1.1 load / FMA），K5 是 1.0——理论上*不该更快*。ncu 数据也确认了：
+
+#ncu-snapshot(
+  version: "K5 block tile 2D",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "2.24 ms",   "*和 K4 几乎相同* (2.19 vs 2.24)"),
+    ("Memory SOL",           "95.2 %",    "HBM 又打满了——tile 缩到 32²"),
+    ("Compute (SM) SOL",     "49.9 %",    ""),
+    ("Registers / thread",   "40",        "比 K4 少（4 acc vs 8 acc）"),
+    ("Achieved Occupancy",   "71.5 %",    "占用率更高，但 tile 也小了"),
+  ),
+)
+
+*一个诚实的教训*：ladder 上"更好"不等于"更快"。K4 和 K5 数字几乎重合，因为：
+
+- K4 tile 64² + 每 thread 8 acc → tile 大、reg 多；
+- K5 tile 32² + 每 thread 4 acc → tile 小、reg 少；
+
+两者对 SMEM 传输和寄存器复用的总量*近似相等*，只是分布不同。真正的下一步不是继续拉 register tile，而是*让 SMEM/HBM 每次传更多 byte*——vectorization。
+
+#verdict(
+  problem: [2D register tile 结构对了，但 tile 只有 $32 times 32$、K 只有 16——SMEM tile fill 阶段（每次搬 $32 times 16 times 2 = 1024$ float）用的还是 scalar 4-byte load。],
+  evidence: [K5 vs K4：Duration 2.24 vs 2.19，占用率 71% vs 48%——结构变得"更健康"了，但吞吐没变。HBM SOL 又回到 95%，说明 tile 太小、reuse 不足。],
+  next: [用 `float4`（128 bit LDG）把 HBM→SMEM 和 SMEM→register 的 traffic 都压成 1/4 条指令；同时把 tile 撑到 $64 times 64$、thread tile 撑到 $4 times 4$。]
+)
+
+== K6: vectorized loads（float4）
+
+关键改动有三个，*同时*发生：
+
+1. tile 从 $32 times 32$ 撑到 $64 times 64$；
+2. 每 thread 从 $2 times 2$ 撑到 $4 times 4$ = 16 个 acc；
+3. HBM→SMEM 的 load 用 `float4`（128 bit LDG），SMEM→register 的 frag load 一次读 4 个 float 存 register。
+
+```cpp
+constexpr int kBlockTileM = 64, kBlockTileN = 64, kBlockTileK = 8;
+constexpr int kThreadTileM = 4, kThreadTileN = 4;
+constexpr int kThreadsX = 16, kThreadsY = 16;   // 256 thread / block
+
+// HBM → SMEM，一半 thread 搬 A，另一半搬 B，各发一条 LDG.E.128
+if (tid < 128) {
+    // 32 lane × 128 bit = 4096 bit = 512 B per warp = 4 个 128 B transaction
+    float4 v = *reinterpret_cast<const float4*>(&a[g_row * k + g_col]);
+    *reinterpret_cast<float4*>(&a_tile[a_r][a_c]) = v;
+} else {
+    float4 v = *reinterpret_cast<const float4*>(&b[g_row * n + g_col]);
+    *reinterpret_cast<float4*>(&b_tile[b_r][b_c]) = v;
+}
+
+// register tile: 4×4 outer product
+#pragma unroll
+for (int inner = 0; inner < kBlockTileK; ++inner) {
+    float a_frag[4], b_frag[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) a_frag[i] = a_tile[ty * 4 + i][inner];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) b_frag[j] = b_tile[inner][tx * 4 + j];
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+            acc[i][j] += a_frag[i] * b_frag[j];   // 16 FMA / 8 loads
+}
+```
+
+现在内层 K 循环里，8 个 SMEM load 服务 16 个 FMA——ratio 2.0（K4 是 0.9，K5 是 1.0）。同时 tile 大到 $64 times 64$，从 HBM 每读入 1 KB 的 A/B tile 能算 $64^2 = 4096$ 个部分和。
+
+#ncu-snapshot(
+  version: "K6 vectorized",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "1.47 ms",   "比 K5 快 1.5×，比 K0 慢 7.1×"),
+    ("Compute (SM) SOL",     "74.2 %",    "*第一次 compute SOL 高于 memory SOL*"),
+    ("Memory SOL",           "72.2 %",    "HBM 使用率降回 70——AI 明显上来了"),
+    ("Registers / thread",   "59",        "16 acc + fragment 变量"),
+    ("Achieved Occupancy",   "43.7 %",    "又跌一档——但更快"),
+    ("Memory Throughput",    "47.3 GB/s", ""),
+  ),
+)
+
+*重要读数*：Compute SOL 74% > Memory SOL 72%——GEMM *终于跨过 roofline 的 ridge*，进入 compute-bound 区。这是"scalar CUDA-core GEMM"能达到的顶点：CUDA core 忙于发 FMA，HBM 不再是瓶颈。
+
+*剩下的 gap*：11.7 TFLOPS / 19.5 TFLOPS CUDA-core peak = 60%。剩下的 40% 主要是：
+- SMEM bank conflict（$4 times 4$ register tile 的 A frag load 有 stride-1 pattern，容易 conflict）；
+- `__syncthreads` 阻塞；
+- 没有 `cp.async` async load，SMEM fill 期间 SM 空等。
+
+#verdict(
+  problem: [已经把 CUDA-core FP32 GEMM 压到接近极限。要再快，必须绕开 CUDA core 走 tensor core。],
+  evidence: [Compute SOL 74%（$approx$ CUDA-core FP32 peak 的 60%），HBM 用量降到 72%——不再是 memory-bound。],
+  next: [切换到 FP16 输入 + tensor core（`mma.sync`）。同一个 K 循环从"每 warp 32 个 FFMA"变成"每 warp 1 条 HMMA = 4096 个 FMA"。硬件算力峰值从 19.5 TFLOPS 跳到 312 TFLOPS。]
+)
+
+== K7: MMA PTX（tensor core，raw PTX）
+
+*从这里开始，dtype 换到 FP16 输入 / FP32 accumulate*。CUDA core 的 FFMA 换成 tensor core 的 HMMA。
+
+A100 上支持的 FP16→FP32 MMA 指令有多种 shape，我们用 `mma.sync.aligned.m16n8k16`：一个 warp（32 lane）协作，做一次 $16 times 8$ 输出、$K = 16$ 的外积累加。*一个 warp 一条指令 = 16 × 8 × 16 × 2 = 4096 FLOP。*
+
+```cpp
+__global__ void matmul_kernel(const __half* a, const __half* b, float* c,
+                              int m, int n, int k) {
+    // block: 4 warp = 128 thread。2×2 warp 分工，覆盖 32×16 的 C tile。
+    __shared__ __half a_tile[32][16];
+    __shared__ __half b_tile[16][16];
+    /* warp_m = warp_id / 2, warp_n = warp_id % 2 */
+    float acc[4] = {};
+
+    for (int tile_k = 0; tile_k < k; tile_k += 16) {
+        /* cooperative load __half tiles */
+        __syncthreads();
+
+        // ldmatrix：一条指令让 32 lane 协作把 SMEM 里 4 个 8×8 __half 块
+        // 加载到每 lane 的 4 个 .b32 寄存器里，layout 正好符合 mma.sync 期望
+        uint32_t a_reg[4], b_reg[2];
+        asm("ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+            : "=r"(a_reg[0]), ... : "r"(smem_addr_a));
+        asm("ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0,%1}, [%2];\n"
+            : "=r"(b_reg[0]), "=r"(b_reg[1]) : "r"(smem_addr_b));
+
+        // 一条 HMMA = 4096 FLOP
+        asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+            "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};\n"
+            : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
+            : "r"(a_reg[0]), ..., "r"(b_reg[0]), "r"(b_reg[1]));
+
+        __syncthreads();
+    }
+    /* 按 mma 的 output layout 存回 c——每 lane 拥有 (group, tig)：
+       group = laneid/4 拥有第 group 行；tig = laneid%4 拥有第 tig*2 和 tig*2+1 列 */
+}
+```
 
 #warn[
-  两个 `__syncthreads` 缺一不可，且不能合并成一个。这是 tiled GEMM 最容易写错的地方。面试手写 tiled matmul 时，先画 timeline：load → sync → compute → sync → load → ...
+  `ldmatrix` 和 `mma.sync` 都是 warp-scope 指令——32 lane 必须*同时执行*且*收敛*。任何 divergence（`if`）都会让它 undefined。这是 tensor core 编程和普通 CUDA 最大的心智负担：从"per-thread scalar 思维"切到"per-warp collective 思维"。
 ]
 
-=== 双缓冲（ping-pong）思路
+#ncu-snapshot(
+  version: "K7 MMA PTX",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "1.18 ms",   "比 K6 快 1.24×——但*远* 未达 tensor core 峰值"),
+    ("Compute (SM) SOL",     "44.3 %",    "*反而降低了*！tensor pipe 只占用了 44%"),
+    ("Memory SOL",           "91.7 %",    "HBM 又打满——tile 太小、reuse 不足"),
+    ("Registers / thread",   "48",        ""),
+    ("L2 Hit Rate",          "98.7 %",    "cuBLAS 式的 L2 命中"),
+    ("Achieved Occupancy",   "60.1 %",    ""),
+  ),
+)
 
-当前版本：load → sync → compute → sync → load → ... 完全串行，SM 在 load 阶段 idle，在 compute 阶段 memory pipe idle。
+*核心问题*：14.6 TFLOPS 只是 A100 FP16 tensor core 峰值 (312 TFLOPS) 的 *4.7%*——比 K6 (CUDA core, 11.7 TFLOPS) 只快 25%。原因在 block 结构：
 
-双缓冲：准备两块 smem `a_tiles[2][...]`, `b_tiles[2][...]`。
+- 每 block 4 warp，输出 tile 只有 $32 times 16$；一个 K-slab 只发 4 条 HMMA 指令，然后就要 `__syncthreads` 等下一批 SMEM 数据。
+- 4 条 HMMA / K-slab、每条 100+ 周期——总共 K 循环有 $2048 / 16 = 128$ 个 slab、每 slab 5–6 μs 空转，绝大部分时间在等 SMEM fill。
 
-```
-stage 0: [load tile 0]
-stage 1: [compute tile 0] || [load tile 1]   ← 理想情况下重叠
-stage 2: [compute tile 1] || [load tile 2]
-...
-```
+*这不是 tensor core 的错——是我们用得太"薄"了*。真正的 tensor core kernel 应该让每 warp 拥有 $64 times 64$ 或 $128 times 128$ 的输出 tile，把几十条 HMMA *串起来* 从而摊薄 SMEM fill 开销。这需要*寄存器爆表*和*多 stage pipeline*，超出本章 K7/K8 的示范范围。
 
-用 `cp.async`（下一节详讲）可以让 load 和 compute *真正* overlap。本书 v5 pipeline teaching kernel 用 `stage = tile_index & 1` 实现了 ping-pong 骨架（仍用 scalar load，结构先行）。
+#verdict(
+  problem: [Per-warp output tile 只有 $16 times 8$，SMEM fill 占了大部分时间。HMMA 快，但 kernel 没让它一直跑。],
+  evidence: [Compute SOL 44% + Memory SOL 92%——SM 大多数时间等 HBM。TFLOPS 14.6 / 312 peak = 4.7%。],
+  next: [K8 用 nvcuda::wmma API 让每 warp tile 从 $16 times 8$ 升到 $16 times 16$，同时把语法层从 raw PTX 抬到 C++ 模板——但底层其实是同一件事。真正吃掉 tensor core 需要*章末讨论的* CUTLASS 式 stage / warp specialisation。]
+)
 
-=== 这版还剩什么瓶颈
+== K8: WMMA（`nvcuda::wmma` fragment API）
 
-1. 每个 thread 只算 1 个输出 → register 利用率低。
-2. Global load 仍是 scalar `float` → 带宽浪费。
-3. `a_tile[ty][inner]` 如果布局不当会有 bank conflict（后面专讲）。
-4. $B_M = B_N = B_K = 16$ 太小 → AI 只有 $approx 4 "FLOP/B"$，还在 memory-bound 区间。
-
-== v3: warp tile
+同样的思想，更高抽象层：
 
 ```cpp
-// block: (32, 8) = 256 threads = 8 warps
-// block tile: 8×64 output
-__global__ void matmul_warp_tiled_kernel(...) {
-  __shared__ float a_tile[kBlockTileM][kBlockTileK];  // 8×16
-  __shared__ float b_tile[kBlockTileK][kBlockTileN];  // 16×64
+#include <mma.h>
+using namespace nvcuda;
 
-  const int lane = threadIdx.x;       // 0..31, warp 内 lane id
-  const int warp_id = threadIdx.y;    // 0..7, 第几个 warp
-  const int row = blockIdx.y * kBlockTileM + warp_id;
-  const int col0 = blockIdx.x * kBlockTileN + lane;
-  const int col1 = col0 + 32;
+// warp 拥有 16×16 输出（K7 是 16×8），block 2×2 warp = 32×32 C tile
+constexpr int kBlockTileM = 32, kBlockTileN = 32, kBlockTileK = 16;
 
-  float acc0 = 0.0f, acc1 = 0.0f;
+__global__ void matmul_kernel(const __half* a, const __half* b, float* c,
+                              int m, int n, int k) {
+    __shared__ __half a_tile[kBlockTileM][kBlockTileK];
+    __shared__ __half b_tile[kBlockTileK][kBlockTileN];
 
-  for (int tile_k = 0; tile_k < k; tile_k += kBlockTileK) {
-    // 协作 load A tile (128 elements) 和 B tile (1024 elements)
-    ...
-    __syncthreads();
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+    wmma::fill_fragment(c_frag, 0.f);
 
-    if (row < m) {
-      #pragma unroll
-      for (int inner = 0; inner < kBlockTileK; ++inner) {
-        const float a_value = a_tile[warp_id][inner];
-        acc0 += a_value * b_tile[inner][lane];
-        acc1 += a_value * b_tile[inner][lane + 32];
-      }
+    for (int tile_k = 0; tile_k < k; tile_k += kBlockTileK) {
+        /* cooperative load __half tiles */
+        __syncthreads();
+
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag;
+        wmma::load_matrix_sync(a_frag, &a_tile[warp_m * 16][0], kBlockTileK);
+        wmma::load_matrix_sync(b_frag, &b_tile[0][warp_n * 16], kBlockTileN);
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+
+        __syncthreads();
     }
-    __syncthreads();
-  }
-  // 写回 acc0 → C[row, col0], acc1 → C[row, col1]
+    wmma::store_matrix_sync(&c[row_base * n + col_base], c_frag, n,
+                            wmma::mem_row_major);
 }
 ```
 
-=== 分工结构
+*和 K7 的区别*：C++ 模板包住了 `ldmatrix` + `mma.sync` + 输出 layout，*底层 PTX 一模一样*。多出来的价值：
+- 编译器帮你选 `ldmatrix` 变体、处理 layout，代码可读性高一个量级；
+- 编译器还能在 fragment 之间做 register 分配优化；
+- fragment $M times N = 16 times 16$，而 K7 的 $16 times 8$——per warp 输出翻倍，占同样 SMEM tile 时 arithmetic 密度也翻倍。
 
-```
-block tile (8×64)
-├── warp 0 → row 0, cols [0..63]
-├── warp 1 → row 1, cols [0..63]
-├── ...
-└── warp 7 → row 7, cols [0..63]
+#ncu-snapshot(
+  version: "K8 WMMA",
+  size: [$M = N = K = 2048$],
+  rows: (
+    ("Duration",             "901 µs",    "比 K7 快 1.31×"),
+    ("Compute (SM) SOL",     "37.1 %",    "还是低——但比 K7 更好用满 tensor pipe"),
+    ("Memory SOL",           "86.4 %",    ""),
+    ("Registers / thread",   "56",        ""),
+    ("L1/TEX Hit Rate",      "14.7 %",    "wmma 的 SMEM staging 用不同的路径"),
+    ("Achieved Occupancy",   "52.4 %",    ""),
+  ),
+)
 
-每个 warp 内:
-  lane 0  → col 0, col 32
-  lane 1  → col 1, col 33
-  ...
-  lane 31 → col 31, col 63
-```
+*19.1 TFLOPS——正好打满 A100 的 CUDA-core FP32 峰值*（19.5 TFLOPS）。但注意：这是"tensor core 干活但性能上限被 CUDA-core-peak 限制"的巧合。真正的天花板：FP16 tensor core = 312 TFLOPS，我们只用了 6.1%。K0 cuBLAS 83 TFLOPS = 27%，也远未打满。
 
-*关键变化*：
+#final-verdict(
+  status: [Ladder K0–K8 在 A100 上到此为止。K8 已经用到了 tensor core，语法层清爽，但*没有*：(1) 多 stage `cp.async` pipeline 掩盖 HBM latency；(2) warp specialisation 让 producer/consumer 各司其职；(3) swizzled SMEM 消除 bank conflict；(4) persistent + split-K/stream-K grid 保持 108 SM 稳态。],
+  note: [K9–K12 就是把这四件事在 Hopper (H100+) 上用 WGMMA + TMA 硬件包装起来——细节在下一节讨论。A100 上继续爬的正统路线是读 CUTLASS 3.x 源码：https://github.com/NVIDIA/cutlass。]
+)
 
-1. *Warp 级分工*：`threadIdx.y` = warp id，`threadIdx.x` = lane id。一个 warp 负责 block tile 的一整行。
-2. *Register 复用*：每个 lane 算 2 个输出（`col0` 和 `col1`）。同一个 `a_value = a_tile[warp_id][inner]` 乘两个不同的 $B$ 值——$A$ 数据在 register 里复用 2 次。
-3. *Broadcast*：`a_tile[warp_id][inner]` 对一个 warp 内所有 lane 相同——编译器/NVIDIA 硬件会把它优化成 warp-wide broadcast（从 smem 读一次，广播给 32 lane）。
+== 综合实测：跨规模 TFLOPS 表
 
-#insight[
-  这就是 CUTLASS 分层的第一 glimpse：*CTA tile* (8×64) → *warp tile* (1×64) → *thread tile* (1×2)。每一层让上一级数据在下一级被复用更多次。
-]
-
-=== 为什么 block 是 32×8
-
-`threadIdx.x = 32` 刚好一个 warp 宽度——warp 内没有 partial warp 浪费。`threadIdx.y = 8` 个 warp 覆盖 8 行。
-
-Load 阶段用 `linear_tid = ty * 32 + tx` 做 grid-stride 协作搬运（B tile 有 1024 元素，256 thread 每人搬 4 个）——这和 vector add 的 grid-stride 是同一个模式。
-
-== v4: register tile (thread tile)
-
-```cpp
-constexpr int kThreadTileM = 2;
-constexpr int kThreadTileN = 2;
-// block tile: 32×32, 每个 thread 算 2×2 = 4 个输出
-
-__global__ void matmul_register_blocked_kernel(...) {
-  __shared__ float a_tile[32][16];
-  __shared__ float b_tile[16][32];
-
-  const int row_base = blockIdx.y * 32 + ty * 2;
-  const int col_base = blockIdx.x * 32 + tx * 2;
-  float acc[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
-
-  for (int tile_k = 0; tile_k < k; tile_k += 16) {
-    // 每个 thread 搬 A 的 2 行 × 1 列, B 的 1 行 × 2 列
-    a_tile[ty][tx] = ...;           // row ty
-    a_tile[ty + 16][tx] = ...;      // row ty+16
-    b_tile[ty][tx] = ...;           // col tx
-    b_tile[ty][tx + 16] = ...;      // col tx+16
-
-    __syncthreads();
-
-    #pragma unroll
-    for (int inner = 0; inner < 16; ++inner) {
-      const float a_frag0 = a_tile[ty * 2 + 0][inner];
-      const float a_frag1 = a_tile[ty * 2 + 1][inner];
-      const float b_frag0 = b_tile[inner][tx * 2 + 0];
-      const float b_frag1 = b_tile[inner][tx * 2 + 1];
-
-      acc[0][0] += a_frag0 * b_frag0;
-      acc[0][1] += a_frag0 * b_frag1;
-      acc[1][0] += a_frag1 * b_frag0;
-      acc[1][1] += a_frag1 * b_frag1;
-    }
-    __syncthreads();
-  }
-  // 写回 2×2 累加器
-}
-```
-
-=== TM×TN thread tile
-
-每个 thread 维护 `acc[TM][TN]` = `acc[2][2]`，一次 inner 迭代：
-
-- 读 2 个 $A$ 值 + 2 个 $B$ 值（共 4 个 smem load）
-- 做 4 次 FMA（更新 4 个输出）
-
-*数据复用比*：每个 $A/B$ smem 元素被复用 `TN`/`TM` 次。2×2 tile → 每个 load 服务 2 个 FMA。
-
-生产 GEMM 常见 4×8、8×8 等更大 thread tile——register 占用和 AI 的 tradeoff。
-
-=== 寄存器压力
-
-`acc[2][2]` + 4 个 fragment + loop 变量 ≈ 10+ registers/thread。如果 thread tile 太大（比如 8×8 = 64 个 acc），256 thread/block 可能需要 200+ registers/thread → occupancy 暴跌。
-
-#note[
-  选 thread tile 大小时，先用 `--ptxas-options=-v` 看 register 用量，再查 occupancy calculator。A100 一个 SM 最多 65536 registers，2048 threads → 平均 32 registers/thread 时 occupancy 100%。
-]
-
-=== 计算顺序：inner product vs outer product
-
-当前实现是 *inner product* 风格：固定 `inner`，遍历 $A$ 的一列片段和 $B$ 的一行片段。
-
-高性能 GEMM 也常用 *outer product* 风格：固定 $A$ 的一小列 + $B$ 的一小行，外积累加到整个 acc 矩阵。Tensor core 版本必须是 outer product（`mma.sync` 的语义）。
-
-== v5: pipeline + ping-pong staging
-
-源码的 `matmul_pipeline_teaching_kernel` 在 v4 基础上加了双缓冲：
-
-```cpp
-__shared__ float a_tiles[2][32][16];
-__shared__ float b_tiles[2][16][32];
-
-// prologue: 搬 tile 0 到 stage 0
-__syncthreads();
-
-for (int tile_index = 0; tile_index < num_k_tiles; ++tile_index) {
-  const int stage = tile_index & 1;
-
-  // 用 stage 的数据计算
-  #pragma unroll
-  for (int inner = 0; inner < 16; ++inner) {
-    acc[0][0] += a_tiles[stage][ty*2+0][inner] * b_tiles[stage][inner][tx*2+0];
-    // ... acc[0][1], acc[1][0], acc[1][1]
-  }
-
-  // 预加载下一块到 stage ^ 1
-  if (tile_index + 1 < num_k_tiles) {
-    __syncthreads();
-    // load into a_tiles[next_stage], b_tiles[next_stage]
-    __syncthreads();
-  }
-}
-```
-
-#insight[
-  这个 kernel 仍然是 scalar FMA——*不是*真正的 tensor core 实现。它的教学价值是让你读懂 modern GEMM 的 pipeline 骨架：prologue → (compute stage *i* || load stage *i+1*) → epilogue。真正的 overlap 需要 `cp.async` 或 TMA（SM90+）。
-]
-
-=== Pipeline 三阶段时间线
-
-```
-时间 →
-Prologue:  |-- load K-slab 0 → smem stage 0 --|
-Loop i=0:  |-- compute on stage 0 --|-- load K-slab 1 → stage 1 --|
-Loop i=1:  |-- compute on stage 1 --|-- load K-slab 2 → stage 0 --|  ← 覆写 stage 0 前必须等 i=0 的 compute 全部完成
-...
-Epilogue:  |-- compute last stage --|
-```
-
-Teaching kernel 用两个 `__syncthreads()` 把 load 和 compute *分开*——清楚但无 overlap。`cp.async` 版在 compute 循环体内插入 async copy，由 hardware 保证 stage 就绪，compute 和 load 并行。
-
-=== Register tile 的 inner vs outer product
-
-Teaching kernel 和 register-blocked 版都用 *inner product* 风格：固定 `inner`，取 $A$ 的列片段和 $B$ 的行片段做点积。
-
-Tensor core 路径必须走 *outer product*：每次 `mma.sync` 完成 $K = 16$ 的外积累加，$A$ 的 $16 times 16$ 列块和 $B$ 的 $16 times 8$ 行块 outer-product 到 $16 times 8$ 的 accumulators。CUTLASS 的主循环结构是 outer-product over $K$，和本章 scalar 版的 inner loop 方向相反——读 smem 的 pattern 也因此不同。
-
-== 实测
-
-$M = N = K = 64$（$A + B + C approx 48 "KB"$，整工作集落在 L2 内），A100 80GB SXM4，`ncu --set full` 抓取每个 kernel 的一次 launch。本章是 *compute 章*：perf 表主列是 `TC %` 和 `warp %`，不是 HBM %——但 $64^3$ 规模下两者都极低，定性结构仍看 diag 表。
-
-Launch 配置和 grid 规模如下——grid 极小，远填不满 108 个 SM：
+$M = N = K$ 从 128 到 2048 扫一圈：
 
 #figure(
   table(
-    columns: (auto, auto, auto, auto),
+    columns: 6,
     stroke: 0.5pt + gray,
     inset: 5pt,
-    align: (left, left, left, right),
-    [*version*], [*grid*], [*block*], [*输出覆盖*],
-    [naive / tiled], [(4, 4, 1)], [(16, 16, 1)], [$64 times 64$（$16 times 16$ tile × 16 block）],
-    [warp-tiled], [(1, 8, 1)], [(32, 8, 1)], [$64 times 64$（$8 times 64$ tile × 8 block）],
-    [register-blocked / pipeline], [(2, 2, 1)], [(16, 16, 1)], [$64 times 64$（$32 times 32$ tile × 4 block）],
+    align: (left, right, right, right, right, right),
+    [*version*], [*n=128*], [*n=256*], [*n=512*], [*n=1024*], [*n=2048*],
+    [K0 cuBLAS],              [0.56], [4.46],  [19.9],  [52.5],  [*83.2*],
+    [K1 miscoalesced],        [0.20], [0.34],  [0.43],  [0.46],  [0.47],
+    [K2 coalesced],           [0.31], [1.26],  [2.03],  [2.50],  [2.58],
+    [K3 SMEM tiled],          [0.45], [1.82],  [3.12],  [3.72],  [3.85],
+    [K4 block tile 1D],       [0.17], [0.69],  [2.82],  [5.79],  [7.84],
+    [K5 block tile 2D],       [0.35], [1.57],  [4.82],  [6.89],  [7.67],
+    [K6 vectorized],          [0.18], [0.76],  [3.17],  [7.99],  [11.7],
+    [K7 MMA PTX],             [0.49], [2.09],  [8.21],  [13.1],  [14.6],
+    [K8 WMMA],                [0.38], [1.64],  [6.71],  [13.7],  [*19.1*],
   ),
-  caption: [*Table:* ch4 matmul 各 ladder 版本的 launch 配置。*grid* / *block* 直接对应 `<<<grid, block>>>` 的 CUDA launch 参数（`launch__grid_size` / `launch__block_size`）。*输出覆盖* 说明该 grid 每 block 负责的输出 tile 大小 × block 数量 = 完整的 $64 times 64$ 输出。三种配置对同一输出规模选择了不同的 tile / block / thread-work 权衡：naive 一 thread 一 output（256 thread × 16 block）；warp-tiled 一 warp 一 row（1 warp × 8 block × 8 row/warp）；register-blocked 一 thread 一 4×4 output tile（256 thread × 4 block × 16 output/thread）。],
-  kind: table,
+  caption: [各版本在不同规模下的 effective TFLOPS。粗体是各版本最高值。],
 )
 
-*Observation*：三档 grid 大小都远小于 A100 的 108 个 SM——4×4=16、1×8=8、2×2=4 个 block，一次 wave 就跑完，*根本没进入稳态*。这解释了为什么 `sm__cycles_active` 只有 1% 左右：SM 大部分时间在等 launch overhead 摊薄。所以下面 diag 表的 `warp %`（约 1%）不是 kernel 效率差，而是问题规模太小的伪影。
+*读三件事*：
 
-#include "../bench/04_matmul.typ"
++ *小规模 (n=128, 256) 上高 K 反而慢*——K7/K8 tensor core 版本在 n=128 时（1.5 million FLOP）只有几百 GFLOPS，被 kernel launch overhead 淹没；K0 cuBLAS 甚至更差，因为它内部选算法的 heuristics 在小 shape 上做不好选择。*Small-shape GEMM 是 LLM inference 的常见 case，是 cuBLAS 的传统弱项*——所以生产用 CUTLASS / cuBLASLt 更细的 dispatch。
 
-*TC %* = `sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed`；*warp %* = `sm__warps_active.avg.pct_of_peak_sustained_elapsed`；*HBM %* = `dram__bytes.sum.pct_of_peak_sustained_elapsed`。详见附录 B。
++ *K1 → K2*：不管什么规模，都是 5×–6× 加速。coalescing 是"永远该做"的一步。
 
-#warn[
-  这一章的问题规模是教学 default（$M = N = K = 64$，三个矩阵共约 48 KB），kernel 单次运行只有 6–14 μs。ncu 的定性指标（`issued/32`、`smem conf.`、`barrier stall`）仍能反映 kernel 结构，但*绝对数字对生产规模不完全可信*：
-  - TC % / warp % 会极低（108 个 SM 填不满、无 tensor pipe 活动）
-  - HBM % 会偏低（工作集在 L2 内，分母 elapsed time 含冷启动窗口）
-  想拿到生产规模的数字，把 $M, N, K$ 拉到 4096+，让工作集远超 L2 (40 MB)。
-]
++ *K7 → K8 加速比随规模变小*：n=512 时 8.2 → 6.7（K8 甚至更慢），n=2048 时 14.6 → 19.1（K8 更快）。原因：K7 的 tile 更小、grid 更多、L2 命中率高；K8 tile 大但 warp/block 少，只有 n 大到能 warm up L2 时才发挥优势。
 
-*perf 表读三件事：*
+== K9–K12: Hopper WGMMA/TMA（概览，非本章代码）
 
-+ *TC % 全表 = 0.0——五个 kernel 没有一个走 tensor pipe*。源码全部 `float` + 手写 FFMA，无 `wmma::`、`mma.sync`、`ldmatrix`。`pipeline-teaching` 名字带 "tensor-core"，注释写得很清楚：*仍是 scalar FMA，只展示 ping-pong 骨架*。这是本章最重要的 honesty 点——后半段 WMMA / fragment layout 是*面试和读 CUTLASS 需要的概念*，不是 `./build/04_matmul` 已实现的路径。要测 TC 收益，跑 cuBLAS `cublasGemmEx` 或 CUTLASS example。
+以下内容只讲思想，没有本章代码——A100 (sm_80) 不支持 WGMMA 和 TMA，编都编不了。想跑 K9+ 需要 H100/H200 (sm_90+) 或 Blackwell (sm_100+)。所有描述基于公开的 NVIDIA / CUTLASS 3.x 文档。
 
-+ *tiled 最快（6.24 μs），warp-tiled 最慢（13.76 μs）*。tiled 比 naive 快 26%（6.24 vs 8.48 μs）；warp-tiled 比 naive *慢* 62%——ladder 位置不等于快慢。`warp %` 全表 0.3–1.4%：最多 16 block × 256 thread = 4096 thread，108 SM × 2048 thread/SM 的理论上限差三个数量级——*测到的是结构差异，不是 occupancy 饱和下的 GEMM 峰值*。
+=== K9: 基础 WGMMA（$64 times 64 times 64$ tile，128 thread）
 
-+ *register-blocked / pipeline-teaching 介于中间*（7.52 / 7.10 μs）。register 复用把 `mem stall` 从 naive 的 13.07 降到 4.08–4.23，但 $K = 64$ 只有 4 个 K-slab，FMA 密度提升不够抵消 sync 和 smem 开销；pipeline 版双缓冲 8 KB smem 无 `cp.async` overlap，只比 register-blocked 快 6%。
+Hopper 引入的核心新指令是 *WGMMA* (*Warpgroup* Matrix Multiply-Accumulate)。关键区别：
 
-#figure(
-  hbar-chart(
-    (
-      ("tiled", 6.24),
-      ("pipeline-teaching", 7.10),
-      ("register-blocked", 7.52),
-      ("naive", 8.48),
-      ("warp-tiled", 13.76),
-    ),
-    unit: "μs",
-  ),
-  caption: [`time (μs)` 排序：tiled smem 复用 win；warp-tiled 结构复杂度在小 $N$ 下反噬。],
-)
+- WMMA/MMA 是 *warp*-collective（32 lane），一条 `mma.sync` 一个 warp 做 $16 times 8 times 16$ = 4096 FLOP。
+- WGMMA 是 *warpgroup*-collective（*4 warp = 128 lane*），一条 `wgmma.mma_async` 128 lane 做 $64 times 64 times 16$ = 128 K FLOP——单指令算力提升 32×。
 
-*diag 表读关键教学点：*
+更重要的是：*wgmma 是 async 的*。发指令后立即返回，硬件排队执行；`wgmma.wait_group` 才等结果。这样一个 warpgroup 可以：
+1. 发 wgmma；
+2. 立刻发下一批 SMEM load（cp.async 或 TMA）；
+3. wgmma 结果需要用时才 wait。
 
-*a) 全表 `issued/32 = 32.0`——没有 warp divergence*。边界 `if (row >= m || col >= n)` 和 warp-tiled 的 `if (row < m)` 编译成 predicated FFMA，不是不同 basic block 的分支 divergence。`pred_on/32` 31.2–31.8，issued − pred_on ≈ 0.2–0.8 来自 grid 边缘 thread——*用 "warp lane utilization" 描述 gap，不要说 "divergence"*。
+*K9 tile*: $64 times 64 times 64$。Block 只有 128 thread（一个 warpgroup），SMEM 用 32 KB，占用率低但 wgmma 密度极高。
 
-*b) register-blocked / pipeline-teaching：`smem conf. = 256`——全书第一次非零 bank conflict*。naive / tiled / warp-tiled 都是 0——*不能从源码推断 conflict，只有 metric 说了算*。
+=== K10: 更大 tile（$128 times 128 times 64$）
 
-内层循环读 `a_tile[ty * 2 + 0][inner]` 和 `a_tile[ty * 2 + 1][inner]`：`a_tile` 行宽 16 float = 64 B，行 stride 16 mod 32 = 16 bank → 行 0 与行 2、行 4… 映射到同一 bank 组。一个 warp 里 `ty = 0, 1` 的 thread 同时读 row 0/1/2/3 → 固定 `inner` 时 2-way bank conflict。这是 *register blocking + 固定行 stride* 的代价；生产 GEMM 用 XOR swizzle 或 padding 把 `smem conf.` 压回 0（见下文 bank conflict 节）。
+同样 128 thread，但 warpgroup 里的每 warp 各拥有更多输出 → 每 warp 累加寄存器变成 $32 times 32$。SMEM 用 128 KB（H100 每 SM 有 228 KB），一个 block 独占大半 SM 但 wgmma 数量翻 4 倍。
 
-*c) tiled 引入 sync 成本，warp-tiled 更重*。naive `barrier stall = 0.00`（无 smem）；tiled `0.82`；warp-tiled `1.26`——每 K-slab 两次 `__syncthreads`，$K = 64$、$B_K = 16$ 时重复 4 次，sync 占比在小 kernel 里被放大。warp-tiled 额外有 grid-stride load B tile（1024 元素 / 256 thread）的 loop 控制开销，grid 只有 8 block（vs naive/tiled 16 block），`mem stall = 10.47` 仍高于 tiled 的 7.61——latency hiding 更差。
+K10 vs K9：更大 tile → 更高 AI → 更少 HBM 传输 → 更接近 tensor core peak。典型收益：从 40% peak 到 55% peak。
 
-*d) register 复用降低 mem stall，但 smem conflict 抵消部分收益*。register-blocked `mem stall = 4.23`（naive 13.07 的 1/3），每个 $A/B$ smem 值服务 2×2 FMA；同时 `smem conf. = 256` 让 smem load 串行化。pipeline-teaching 与 register-blocked 共享同一 compute 路径，diag 几乎相同——双缓冲没带来结构性的 stall 下降。
+=== K11: async TMA + producer/consumer warp 分工
 
-#figure(
-  warp-grid(
-    rows: 8, cols: 32,
-    active: (
-      (0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7),
-      (0, 8), (0, 9), (0, 10), (0, 11), (0, 12), (0, 13), (0, 14), (0, 15),
-      (0, 16), (0, 17), (0, 18), (0, 19), (0, 20), (0, 21), (0, 22), (0, 23),
-      (0, 24), (0, 25), (0, 26), (0, 27), (0, 28), (0, 29), (0, 30), (0, 31),
-      (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7),
-      (1, 8), (1, 9), (1, 10), (1, 11), (1, 12), (1, 13), (1, 14), (1, 15),
-      (1, 16), (1, 17), (1, 18), (1, 19), (1, 20), (1, 21), (1, 22), (1, 23),
-      (1, 24), (1, 25), (1, 26), (1, 27), (1, 28), (1, 29), (1, 30), (1, 31),
-      (2, 0), (2, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7),
-      (2, 8), (2, 9), (2, 10), (2, 11), (2, 12), (2, 13), (2, 14), (2, 15),
-      (2, 16), (2, 17), (2, 18), (2, 19), (2, 20), (2, 21), (2, 22), (2, 23),
-      (2, 24), (2, 25), (2, 26), (2, 27), (2, 28), (2, 29), (2, 30), (2, 31),
-      (3, 0), (3, 1), (3, 2), (3, 3), (3, 4), (3, 5), (3, 6), (3, 7),
-      (3, 8), (3, 9), (3, 10), (3, 11), (3, 12), (3, 13), (3, 14), (3, 15),
-      (3, 16), (3, 17), (3, 18), (3, 19), (3, 20), (3, 21), (3, 22), (3, 23),
-      (3, 24), (3, 25), (3, 26), (3, 27), (3, 28), (3, 29), (3, 30), (3, 31),
-      (4, 0), (4, 1), (4, 2), (4, 3), (4, 4), (4, 5), (4, 6), (4, 7),
-      (4, 8), (4, 9), (4, 10), (4, 11), (4, 12), (4, 13), (4, 14), (4, 15),
-      (4, 16), (4, 17), (4, 18), (4, 19), (4, 20), (4, 21), (4, 22), (4, 23),
-      (4, 24), (4, 25), (4, 26), (4, 27), (4, 28), (4, 29), (4, 30), (4, 31),
-      (5, 0), (5, 1), (5, 2), (5, 3), (5, 4), (5, 5), (5, 6), (5, 7),
-      (5, 8), (5, 9), (5, 10), (5, 11), (5, 12), (5, 13), (5, 14), (5, 15),
-      (5, 16), (5, 17), (5, 18), (5, 19), (5, 20), (5, 21), (5, 22), (5, 23),
-      (5, 24), (5, 25), (5, 26), (5, 27), (5, 28), (5, 29), (5, 30), (5, 31),
-      (6, 0), (6, 1), (6, 2), (6, 3), (6, 4), (6, 5), (6, 6), (6, 7),
-      (6, 8), (6, 9), (6, 10), (6, 11), (6, 12), (6, 13), (6, 14), (6, 15),
-      (6, 16), (6, 17), (6, 18), (6, 19), (6, 20), (6, 21), (6, 22), (6, 23),
-      (6, 24), (6, 25), (6, 26), (6, 27), (6, 28), (6, 29), (6, 30), (6, 31),
-      (7, 0), (7, 1), (7, 2), (7, 3), (7, 4), (7, 5), (7, 6), (7, 7),
-      (7, 8), (7, 9), (7, 10), (7, 11), (7, 12), (7, 13), (7, 14), (7, 15),
-      (7, 16), (7, 17), (7, 18), (7, 19), (7, 20), (7, 21), (7, 22), (7, 23),
-      (7, 24), (7, 25), (7, 26), (7, 27), (7, 28), (7, 29), (7, 30), (7, 31),
-    ),
-    row-labels: ("W0", "W1", "W2", "W3", "W4", "W5", "W6", "W7"),
-    title: "warp-tiled block tile（8×64）：每行一个 warp，列方向 32 lane",
-  ),
-  caption: [
-    绿色 = 该 warp 负责的输出列（lane $i$ 算 `col0 = i` 和 `col1 = i + 32`）。
-    `threadIdx.y` = warp id，`threadIdx.x` = lane id——CUTLASS 分层的第一 glimpse。
-  ],
-)
+TMA (Tensor Memory Accelerator) 是 Hopper 上专门做 HBM ↔ SMEM 批量传输的硬件单元。相对 `cp.async`：
+- 一条 TMA 指令传一整个 rank-N tensor（多维索引硬件级支持）；
+- 完全 async，硬件级 DMA，不占 SM 的 issue slot；
+- 支持 multicast（一个 tile 广播到多个 SM 的 SMEM）。
 
-*无信息或为零的 metric：*
+K11 的结构变成：
+- warpgroup 0 = *producer*，只发 TMA 指令搬 A/B tile 到 SMEM；
+- warpgroup 1 = *consumer*，只发 wgmma 消费 SMEM tile。
+- 两者靠 hardware `mbarrier` 同步（Hopper 的 mbarrier 硬件加速）。
 
-- `TC %`：全表 0.0——无 tensor pipe 活动，*符合 scalar FMA 源码*。
-- `HBM %`：0.1–0.3%——48 KB 工作集 L2 resident，*不能用来判断 memory-bound vs compute-bound*。
-- `warp %`：0.3–1.4%——grid 太小，*不是 kernel 设计错了*。
+这就是 CUTLASS 3.x 的 pingpong / cooperative scheduler 的模型。K11 vs K10：从 55% peak → 75% peak。
+
+=== K12: max tile（$128 times 256 times 64$，3 warpgroup）
+
+Full 版：3 个 warpgroup, 一个 producer + 2 个 consumer 或者 1 consumer + 2 producer 之类的组合。每 CTA 384 thread（12 warp），每 SM 只跑 1 个 CTA 但 SMEM 用满 200 KB+。这样每 CTA 可以维持 4–5 stage 的 pipeline，wgmma 几乎不停。
+
+*生产系数*：CUTLASS 3.x 上 FP16 GEMM 达到 H100 830 TFLOPS （HW peak ~1000 TFLOPS 的 83%）。
 
 #insight[
-  GEMM ladder 的第一步永远是 *smem tile 让 $A/B$ 在 block 内复用*（tiled 6.24 μs vs naive 8.48 μs）。在 grid 能喂饱 GPU、且走 tensor pipe 之前，讨论 register tile / pipeline 的绝对加速几乎没有意义——warp-tiled 13.76 μs 比 naive 还慢就是证据。
-]
-
-#insight[
-  *Tile 骨架的收益*和*tensor core 的收益*是两码事。cuBLAS FP16 GEMM 200+ TFLOPS 来自 (a) `mma.sync` tensor pipe、(b) $4096^3$ 填满 108 SM、(c) `cp.async` + swizzle。本章 ladder 教 (a) 之前的结构层；TC % = 0 正是设计如此，不是 benchmark 失败。
+  从 K9 到 K12 看似 4 级 ladder，其实是*同一个 idea 的 4 个规模档*：让 warp 从 32 lane 抬到 128 lane 后，硬件愿意帮你 async、tile 变大、pipeline 变深、producer/consumer 分工——这几件事互相强化。想读懂需要*把 A100 时代的所有 CUTLASS 概念内化*，再理解 Hopper 硬件怎么把它们变成一条指令。这是我推荐 A100 上练完 K0–K8 之后专门开一章"CUTLASS 3.x 精读"的原因。
 ]
 
 #warn[
-  warp-tiled 比 naive 慢*不说明 warp 分工思路错了*——说明在 $64^3$ 微型问题上 load/sync 开销超过了 register 复用收益。永远用 ncu 验证，不要凭 ladder 位置推断快慢。
-]
-
-粗算最快版本（tiled, 6.24 μs）effective TFLOPS：$frac(2 times 64^3, 6.24 times 10^(-6)) approx 53 "GFLOPS"$——A100 FP32 CUDA core 峰值 ~19.5 TFLOPS，利用率 < 0.3%。TC % = 0、warp % < 2%、HBM % < 1% 三个数字一起出现，就是在说：硬件几乎没干活，测到的是 kernel 启动 + L2 命中 + 同步开销，不是生产 GEMM 的性能画像。
-
-== 向量化 load：`float4`
-
-Tiled kernel 的 global → shared 阶段是 bandwidth 瓶颈。Scalar load 每次 4 B，`float4` 每次 16 B：
-
-```cpp
-// 假设 a_tile 按 float4 对齐布局
-const int4* a4 = reinterpret_cast<const int4*>(a + global_row * k + tile_k);
-int4 val = a4[threadIdx.x];  // 一次搬 4 个 float 到 register
-// 再拆分到 smem 或用 int4 直接写 smem
-```
-
-=== 收益来源
-
-1. *指令数减半*：`LDG.E.128` vs 4× `LDG.E.32`。
-2. *Transaction 效率*：一个 warp 32×16B = 512B = 4 个 128B transaction，和 32×4B 一样——但 MSHR 条目更少，latency 更好掩盖。
-3. *Smem 写入*：如果 smem layout 允许，`int4` 写 smem 也更快。
-
-=== 约束
-
-- Global 地址 16B 对齐。
-- Smem 布局必须配合——如果 `a_tile[ty][tx]` 的 `[ty]` 行不是连续 16B，就不能直接 `float4` 写。
-- 尾块处理：$K$ 不是 4 的倍数时需要 scalar epilogue（和 vector add v5 的 tail 同理）。
-
-#warn[
-  向量化 load 必须和 smem *layout* 一起设计。先确定 swizzle 后的布局，再决定怎么用 `float4` 搬——顺序反了会反复改。
+  以上 K9–K12 数字来自 NVIDIA 公开 blog / CUTLASS 3.x example benchmark，没有在本仓库里跑通。想真跑，签 H100 机器，clone CUTLASS 3.x，选 `example/48_hopper_warp_specialized_gemm/` 之类的 target。
 ]
 
 == Bank conflict 与 swizzle
@@ -721,72 +816,43 @@ for (int tile_k = 0; tile_k < k; tile_k += BK) {
   `cp.async` 的 smem 地址必须是 16B 对齐。`cp.async.cg` 绕过 L1 cache 直达 smem——GEMM 通常想要这个行为（数据不复用 L1）。如果用 `ca` 变体，数据会缓存在 L1，可能和后续访问冲突。
 ]
 
-== Tensor Core：`wmma` 与 `mma.sync`
+== Tensor Core 深入：shape 语义与精度
 
-Volta 起 NVIDIA 引入 tensor core：专用硬件做 small tile 矩阵乘加，单条指令完成 $16 times 8 times 16$（FP16→FP32 accumulate）的运算。
+K7/K8 已经落地了 `mma.sync.aligned.m16n8k16` 和 `nvcuda::wmma`。这一节补 shape 表和精度选项——面试常问、代码里没写全的部分。
 
-=== Shape 语义：m16n8k16
+=== Ampere (sm_80) 支持的 MMA shape
 
-`mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` 含义：
+不同 shape 硬件效率不同——`m16n8k16` 是常用的 FP16 shape，但每个 dtype 都有一套自己的 shape 集：
 
-- $M = 16, N = 8, K = 16$：一个 warp 一次算 $16 times 8$ 的输出 tile，沿 $K = 16$ 累加。
-- `.row.col`：$A$ row-major fragment，$B$ column-major fragment。
-- 输入 FP16，累加 FP32。
+#figure(
+  table(
+    columns: (auto, auto, auto, auto),
+    stroke: 0.5pt + gray,
+    inset: 5pt,
+    align: (left, left, left, left),
+    [*shape*], [*dtype (A, B → D)*], [*一条指令 FLOP*], [*用途*],
+    [m16n8k8],  [f16, f16 → f32],   [2048],   [小 tile, warp specialisation],
+    [m16n8k16], [f16, f16 → f32],   [4096],   [标准 (K7/K8)],
+    [m16n8k16], [bf16, bf16 → f32], [4096],   [训练场景，动态范围大],
+    [m16n8k8],  [tf32, tf32 → f32], [1024],   [FP32-flavored 训练],
+    [m16n8k32], [s8, s8 → s32],     [8192],   [INT8 推理],
+    [m16n8k256],[u1, u1 → s32],     [65536],  [BNN 极限——一般用不到],
+  ),
+  caption: [Ampere MMA shape × dtype 表（部分）。完整表见 PTX ISA §mma.]
+)
 
-一个 warp（32 thread）协作填 fragment 并执行一条 `mma.sync`——*每个 thread 不是独立算一个输出*，而是合起来算 16×8 块。
-
-=== WMMA API（高层）
-
-```cpp
-#include <mma.h>
-using namespace nvcuda::wmma;
-
-__global__ void wmma_gemm(half* a, half* b, float* c, ...) {
-  // 一个 warp 一个 wmma tile
-  fragment<matrix_a, 16, 16, 16, half, row_major> a_frag;
-  fragment<matrix_b, 16, 16, 16, half, col_major> b_frag;
-  fragment<accumulator, 16, 16, 16, float> c_frag;
-
-  load_matrix_sync(a_frag, a_smem_ptr, lda);
-  load_matrix_sync(b_frag, b_smem_ptr, ldb);
-  fill_fragment(c_frag, 0.0f);
-
-  mma_sync(c_frag, a_frag, b_frag, c_frag);  // C += A×B
-
-  store_matrix_sync(c_smem_ptr, c_frag, ldc, mem_row_major);
-}
-```
-
-=== MMA PTX（底层，CUTLASS 风格）
-
-```cpp
-// 每个 thread 持有 fragment 的一部分（registers）
-uint32_t a_frag[4];  // 分布因 layout 而异
-uint32_t b_frag[2];
-float    c_frag[4];
-
-// load fragment from smem (custom layout)
-ldmatrix.sync.aligned.m8n8.x4.shared.b16 {...};
-
-// mma
-mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-  {c0,c1,c2,c3}, {a0,a1,a2,a3}, {b0,b1}, {c0,c1,c2,c3};
-```
-
-#note[
-  Fragment layout 是 tensor core 最难的部分——每个 thread 拿哪些元素、smem 怎么 swizzle 才能 `ldmatrix` 无 conflict，需要查 PTX ISA 的 matrix fragment 表。CUTLASS 的 `Layout` 模板就是干这个的。
-]
+*选 shape 的思路*：K 越大，单指令 FLOP 越多，摊薄 issue overhead 越好；但太大的 K 也意味着更多 register pressure。K7 选 `m16n8k16` 是 FP16 里能拿到的最大 K（$K = 8$ 版本用于更小的 warp specialisation kernel）。
 
 === FP32 路径
 
-A100 没有原生 FP32 tensor core。FP32 GEMM 要么：
+A100 上"FP32 GEMM"有三条路：
 
-1. 用 TF32（`mma...f32.tf32.tf32.f32`，精度略降）。
-2. 用 FP16/BF16 tensor core + FP32 accumulate（混合精度）。
-3. 纯 FP32 靠 CUDA core FMA（cuBLAS 的 `Sgemm` 在 Ampere 上仍大量用 CUDA core + 极致 tuning）。
++ *TF32*（`mma...f32.tf32.tf32.f32`）：TF32 是"截断到 10 mantissa bit 的 FP32"，硬件峰值 156 TFLOPS（vs FP16 的 312）。相对 FP32 精度损失 $approx 5 times 10^(-4)$，训练里通常够用。K0 cuBLAS 走的就是这条。
++ *FP16 / BF16 tensor core + FP32 accum*（混合精度）：训练里最常用。BF16 有和 FP32 同样的指数位，动态范围好；FP16 mantissa 精度稍高但范围小、易溢出。
++ *纯 FP32 CUDA-core FFMA*：K1–K6 走的路径。峰值 19.5 TFLOPS，完全没有 tensor core 加持。
 
 #insight[
-  面试说 "我用 tensor core 加速了 GEMM" 时，要说清楚：数据类型（FP16/BF16/TF32）、shape（m16n8k16）、fragment layout、以及 accum 精度（FP32 vs FP16）。
+  面试说 "我用 tensor core 加速了 GEMM"，要能马上讲清：*数据类型*（FP16 / BF16 / TF32 / INT8）、*shape*（m16n8k16 之类）、*accum 精度*（FP16 累加会精度爆炸，训练 GEMM 必须 FP32 accum）。
 ]
 
 == CUTLASS 的分层思路
@@ -809,19 +875,19 @@ GemmShape<128, 256, 16>   // CTA tile: 128×256 output, K=16 per step
     inset: 6pt,
     align: (left, left, left),
     [*层级*], [*做什么*], [*对应本章*],
-    [CTA (block) tile], [决定 smem 大小、grid 划分], [v2 tiled],
-    [Warp tile], [warp 间分工、warp-level mma], [v3 warp tile],
-    [Thread tile], [register acc、数据复用], [v4 register blocked],
-    [Instruction], [`mma.sync` / `ldmatrix`], [tensor core 节],
-    [Epilogue], [alpha/beta scaling、bias、activation], [未覆盖（见 MLP 章）],
+    [CTA (block) tile], [决定 smem 大小、grid 划分],       [K3 SMEM tiled],
+    [Warp tile],         [warp 间分工、warp-level mma],    [K8 WMMA 里的 `warp_m/warp_n`],
+    [Thread tile],       [register acc、数据复用],        [K4 / K5 / K6],
+    [Instruction],       [`mma.sync` / `ldmatrix`],       [K7 (PTX) / K8 (wmma API)],
+    [Epilogue],          [alpha/beta scaling、bias、activation], [未覆盖（见 MLP 章）],
   ),
-  caption: [*Table:* CUTLASS hierarchical GEMM 的五层分解，及本书 ladder 各版本对应的层级。从上到下粒度递减：CTA 决定"这个 block 输出哪一片"，warp 决定"warp 内 32 lane 如何分工做小 mma"，thread 决定寄存器如何缓存数据以复用，instruction 是硬件级 `mma.sync` / `wgmma.mma_async_sync` 的粒度，epilogue 是 accum → output 的写回阶段（活化、scale、bias 融合都在这里）。],
+  caption: [*Table:* CUTLASS hierarchical GEMM 的五层分解，及本书 ladder 各版本对应的层级。从上到下粒度递减：CTA 决定"这个 block 输出哪一片"，warp 决定"warp 内 32 lane 如何分工做小 mma"，thread 决定寄存器如何缓存数据以复用，instruction 是硬件级 `mma.sync` / `wgmma.mma_async` 的粒度，epilogue 是 accum → output 的写回阶段（activation、scale、bias 融合都在这里）。],
   kind: table,
 )
 
-*Observation*：本书 ladder 沿"CTA → warp → thread"这条主路径爬到 v4，*没走 instruction 层*（未用 tensor core PTX）——这正是本章 diag 表 `TC % = 0` 的根源。生产 kernel（cuBLASLt、CUTLASS）几乎所有优化都发生在 instruction 层之下（`ldmatrix.x4`、`mma.sync` shape 选择、swizzle 消除 bank conflict、`cp.async` 双缓冲），本书跳过这层。想真上手 tensor core 请从 CUTLASS 官方 tutorial 起步。
+*Observation*：本书 K0–K8 沿"CTA → thread → instruction"这条主路径爬完，但*没走 warp specialisation*——CUTLASS 3.x 的 pingpong / cooperative scheduler 让 warpgroup 一部分做 producer、一部分做 consumer，是 A100/H100 拿到 tensor-core 峰值 60–80% 的关键（章末 K11 讲）。手写还想继续追，需要 (1) 更大 tile（$128 times 128$ 及以上）+ (2) `cp.async` 多 stage pipeline + (3) swizzled SMEM layout。这三件事互相耦合，一起改。
 
-CUTLASS 还处理了：auto-tuning tile 参数、split-K、Stream-K、TMA async copy（SM90）、FP8/Block-scaled 等。本书 ladder 是 CUTLASS 的简化手工版。
+CUTLASS 还处理了：auto-tuning tile 参数、split-K、Stream-K、TMA async copy（SM90）、FP8/Block-scaled 等。本书 K0–K8 ladder 是 CUTLASS 的简化手工版；想读懂 CUTLASS 3.x，先把本章 K3–K8 完全内化。
 
 == Split-K：什么时候用
 
@@ -843,7 +909,7 @@ Final: C = C_partial[0] + C_partial[1]
 *代价*：需要 atomic add 或 secondary reduction kernel，引入同步开销。cuBLAS 内部 heuristics 自动决定是否 split-K。
 
 #interview[
-  Split-K 和 K-dimension tiling（本章 v2 的 `tile_k` 循环）是不同的：后者是在*同一个 block 内*沿 $K$ 累加；前者是*多个 block 分工* $K$ 的不同段，需要 merge。
+  Split-K 和 K-dimension tiling（本章 K3+ 的 `tile_k` 循环）是不同的：后者是在*同一个 block 内*沿 $K$ 累加，最后一次性写 $C$；前者是*多个 block 分工* $K$ 的不同段，需要 atomic add 或二级 reduction merge。
 ]
 
 == cuBLAS 为什么快

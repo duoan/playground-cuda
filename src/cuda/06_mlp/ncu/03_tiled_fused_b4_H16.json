@@ -1,0 +1,44 @@
+{
+  "log": "src/cuda/06_mlp/ncu/03_tiled_fused_b4_H16.txt",
+  "meta": {
+    "binary": "/home/duo.an/workspaces/playground-cuda/build/06_mlp/03_tiled_fused__BATCH4_HIDDEN_DIM16_INPUT_DIM8_OUTPUT_DIM4",
+    "argv": "(none)",
+    "defines": "-DBATCH=4 -DINPUT_DIM=8 -DHIDDEN_DIM=16 -DOUTPUT_DIM=4",
+    "size_tag": "b4_H16",
+    "date": "2026-09-03T19:24:16Z",
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "ncu": "NVIDIA (R) Nsight Compute Command Line Profiler",
+    "note": "-D BATCH -D INPUT_DIM -D HIDDEN_DIM -D OUTPUT_DIM (INPUT=H/2, OUTPUT=H/4, clamped); HIDDEN_DIM capped at 1024 = max threads/block"
+  },
+  "kernels": [
+    {
+      "kernel": "mlp_tiled_fused_kernel",
+      "grid": "4,1,1",
+      "block": "16,1,1",
+      "duration_us": 4.48,
+      "elapsed_cycles": 5104.0,
+      "sm_active_cycles": 112.0,
+      "sol_memory_pct": 0.36,
+      "sol_dram_pct": 0.06,
+      "sol_compute_pct": 0.03,
+      "sol_l1_pct": 5.52,
+      "sol_l2_pct": 0.36,
+      "l1_hit_pct": 23.68,
+      "l2_hit_pct": 90.3,
+      "mem_throughput_gbs": 1.11,
+      "mem_max_bw_pct": 0.32,
+      "ipc_active": 0.03,
+      "issue_slots_busy": 0.02,
+      "registers": 30.0,
+      "block_size": 16.0,
+      "grid_size": 4.0,
+      "static_smem_bytes": 80.0,
+      "dyn_smem_bytes": 0.0,
+      "waves_per_sm": 0.0,
+      "occupancy_pct": 1.63,
+      "theo_occupancy_pct": 50.0,
+      "branch_efficiency": 0.0,
+      "duration_us_norm": 4.48
+    }
+  ]
+}

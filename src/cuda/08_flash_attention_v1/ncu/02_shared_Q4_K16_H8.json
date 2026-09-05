@@ -1,0 +1,44 @@
+{
+  "log": "src/cuda/08_flash_attention_v1/ncu/02_shared_Q4_K16_H8.txt",
+  "meta": {
+    "binary": "/home/duo.an/workspaces/playground-cuda/build/08_flash_attention_v1/02_shared__HEAD_DIM8_KEY_COUNT16_QUERY_COUNT4",
+    "argv": "(none)",
+    "defines": "-DQUERY_COUNT=4 -DKEY_COUNT=16 -DHEAD_DIM=8",
+    "size_tag": "Q4_K16_H8",
+    "date": "2026-09-03T19:20:20Z",
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "ncu": "NVIDIA (R) Nsight Compute Command Line Profiler",
+    "note": "-D QUERY_COUNT -D KEY_COUNT -D HEAD_DIM"
+  },
+  "kernels": [
+    {
+      "kernel": "fa_v1_shared_kernel",
+      "grid": "4,1,1",
+      "block": "8,1,1",
+      "duration_us": 9.02,
+      "elapsed_cycles": 10375.0,
+      "sm_active_cycles": 306.38,
+      "sol_memory_pct": 0.39,
+      "sol_dram_pct": 0.08,
+      "sol_compute_pct": 0.11,
+      "sol_l1_pct": 3.24,
+      "sol_l2_pct": 0.39,
+      "l1_hit_pct": 87.17,
+      "l2_hit_pct": 60.64,
+      "mem_throughput_gbs": 1.56,
+      "mem_max_bw_pct": 0.27,
+      "ipc_active": 0.14,
+      "issue_slots_busy": 0.11,
+      "registers": 40.0,
+      "block_size": 8.0,
+      "grid_size": 4.0,
+      "static_smem_bytes": 312.0,
+      "dyn_smem_bytes": 0.0,
+      "waves_per_sm": 0.0,
+      "occupancy_pct": 1.57,
+      "theo_occupancy_pct": 50.0,
+      "branch_efficiency": 86.89,
+      "duration_us_norm": 9.02
+    }
+  ]
+}

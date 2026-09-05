@@ -503,6 +503,30 @@ $ tilde(O)[i,:] arrow.l tilde(O)[i,:] dot exp(m - m_"new") + exp(S[i,j] - m_"new
 
 最后 $O[i,:] = tilde(O)[i,:] / ell$。Production FA3 在 *tile 粒度* 做同样 merge：一个 WGMMA 产出 $B_r times B_c$ 的 $S$ tile，warp 协作 reduce max / sum，再 RS-GEMM 更新 $B_r times d$ 的 $O$ tile——*公式不变，并行粒度变大*。
 
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "warp_streaming (single-buffered)",
+  size: [$N_q = 128$, $N_k = 512$, head_dim = 32],
+  rows: (
+    ("Duration",            "483.9 µs", ""),
+    ("Memory SOL",          "10.2 %",   "*较 FA v2 反而低*——教学 kernel 简化，未 chase peak"),
+    ("Compute SOL",         "1.8 %",    ""),
+    ("Achieved Occupancy",  "1.9 %",    "同样 warp-per-row 设计"),
+  ),
+)
+
+*比 FA v2 慢*——这是本章一开始就 disclaim 的：*A100 上跑 FA v3 teaching kernel 只能观察结构，看不到 SM90 特性带来的加速*。原因：
+
+- FA v3 的核心 innovation（TMA async load、WGMMA、setmaxnreg producer/consumer 寄存器分区）*只在 SM90+（Hopper H100）架构上有硬件支持*。A100 (SM80) 上跑 v3 teaching kernel = 拿到"结构正确、性能不如 FA v2"的 baseline。
+- 本 kernel 用 scalar dot + 单 warp per query row + 单 buffer $K/V$——比 FA v2 warp_specialised 还少了几个 optimization（v2 的 warp specialization 在 A100 上还有意义，v3 的 producer-consumer 分离只在 H100 上有 TMA 支持）。
+
+#verdict(
+  problem: [单 buffered $K/V$：加载下一个 tile 时 compute 完全 stall；SM80 上没有 TMA 硬件加速 async load],
+  evidence: [duration 484 μs vs FA v2 warp 330 μs（慢 47%）；memSOL 10% 说明 memory pipeline 完全串行],
+  next: [v3 pipeline 加入 $"kPipelineStages"$-buffered $K/V$ smem——load stage $s$ 和 compute stage $s-1$ 尝试用 `__syncthreads` 结构性 overlap（不是真正 async，因为 A100 没 TMA）]
+)
+
 == v3: pipeline teaching kernel
 
 ```cpp
@@ -569,6 +593,28 @@ H100 上 exp 吞吐 ~3.9 TFLOPS vs matmul ~989 TFLOPS（FP16）——head dim 12
 - *Skip tile*：若整个 $K_j$ tile 的 key index 均 $>$ 当前 query block 的最大 index，producer 可 skip TMA（省 bandwidth）。
 - *Partial tile*：tile 跨 causal 对角线时，在 register 上对 $S$ 做 mask 再 softmax——不能 skip WGMMA，但可 skip 无效行的 exp。
 - *FP8 + causal*：mask 后 tile 内有效元素稀疏，block quant dynamic range 改善，但 warp 利用率下降——论文 FP8 causal 略慢于 cuDNN 的原因之一。
+
+=== ncu 实测
+
+#ncu-snapshot(
+  version: "pipeline (multi-buffered smem)",
+  size: [$N_q = 128$, $N_k = 512$, head_dim = 32],
+  rows: (
+    ("Duration",            "438.9 µs", "vs warp_streaming 484 μs，*快 10%*"),
+    ("Memory SOL",          "11.3 %",   "略高于单 buffer 版"),
+    ("Compute SOL",         "2.4 %",    "*↑ 从 1.8%*——compute 相对忙一点"),
+    ("Achieved Occupancy",  "1.9 %",    ""),
+  ),
+)
+
+*10% 提升* —— 结构性 overlap 通过多 buffer 拿到了小额收益：当 compute stage $s-1$ 在算 $S/P$ 时，load stage $s$ 已经在往 smem 里搬 $K_j, V_j$。但 A100 上没有 TMA，load 走的还是普通的 `LDG.E`，需要 warp 主动 issue —— *这不是真的 async*，只是 shared-memory pre-fetch，`__syncthreads` 依然阻塞。
+
+在 H100 上，这个 kernel 骨架换成 producer/consumer warp specialization + TMA + `mbarrier` + WGMMA 之后，overlap 会做到真正的 async，性能可以 2-4× 提升。SM80 上跑这个 kernel 主要是*结构演示*。
+
+#final-verdict(
+  status: [FA v3 教学 kernel 展示了 producer/consumer + multi-buffered pipeline 的骨架。],
+  note: [A100 上跑这套 kernel 只能拿到 A100 上的性能上限（比 FA v2 的 warp specialization 略慢，因为 v3 引入的复杂度在 SM80 上没有对应硬件支持）。真正的 FA v3 加速：需要 H100 (SM90+)，用 TMA async load 让 producer warp group 独立发 memory 请求，用 WGMMA 让 consumer warp group 独立发 tensor core 请求，两者互不阻塞。这一节到此完成教学目的——把 FA v1 → v2 → v3 的三步演进讲清楚。生产实现请参考 flash-attn 官方库。]
+)
 
 == Innovation 1：Producer-Consumer Warp Specialization
 

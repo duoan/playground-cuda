@@ -1,0 +1,43 @@
+{
+  "log": "src/cuda/02_reduce_sum/ncu/03_sequential_n22.txt",
+  "meta": {
+    "binary": "/home/duo.an/workspaces/playground-cuda/build/02_reduce_sum/03_sequential",
+    "argv": "22",
+    "defines": "(none)",
+    "size_tag": "n22",
+    "date": "2026-09-03T21:43:07Z",
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "ncu": "NVIDIA (R) Nsight Compute Command Line Profiler",
+    "note": "argv = log2N; atomic version fails self-check above n=22 due to fp32 accumulator precision, so we stop there"
+  },
+  "kernels": [
+    {
+      "kernel": "reduce_sum_kernel",
+      "grid": "16385,1,1",
+      "block": "256,1,1",
+      "duration_us": 50.91,
+      "elapsed_cycles": 58525.0,
+      "sm_active_cycles": 52479.45,
+      "sol_memory_pct": 64.09,
+      "sol_dram_pct": 16.2,
+      "sol_compute_pct": 56.71,
+      "sol_l1_pct": 71.23,
+      "sol_l2_pct": 15.62,
+      "l1_hit_pct": 0.0,
+      "l2_hit_pct": 6.16,
+      "mem_throughput_gbs": 329.86,
+      "mem_max_bw_pct": 56.71,
+      "ipc_active": 2.33,
+      "issue_slots_busy": 52.47,
+      "registers": 16.0,
+      "block_size": 256.0,
+      "grid_size": 16385.0,
+      "static_smem_bytes": 0.0,
+      "waves_per_sm": 18.96,
+      "occupancy_pct": 87.69,
+      "theo_occupancy_pct": 100.0,
+      "branch_efficiency": 100.0,
+      "duration_us_norm": 50.91
+    }
+  ]
+}

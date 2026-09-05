@@ -18,7 +18,7 @@ all: 01 02 03 04 05 06 07 08 09 10
 # HBM and cache-hit artifacts disappear.  Bytes = 3 * 4 * (1<<27) = 1.5 GB.
 # ---------------------------------------------------------------------------
 .PHONY: 01
-01: $(BUILD)/01_vector_add
+01: $(BUILD)/01_vector_add/bench
 	$(RUN) $< vector_add 01_vector_add mem \
 	    --bytes-per-launch $$((3 * 4 * (1 << 27))) \
 	    --binary-args "27"
@@ -28,7 +28,7 @@ all: 01 02 03 04 05 06 07 08 09 10
 # read the whole thing; subsequent stages get much smaller.
 # ---------------------------------------------------------------------------
 .PHONY: 02
-02: $(BUILD)/02_reduce_sum
+02: $(BUILD)/02_reduce_sum/bench
 	$(RUN) $< reduce_sum 02_reduce_sum mem \
 	    --bytes-per-launch $$((4 * ((1 << 27) + 37))) \
 	    --binary-args "27"
@@ -39,14 +39,14 @@ all: 01 02 03 04 05 06 07 08 09 10
 # ---------------------------------------------------------------------------
 SOFTMAX_BYTES ?= $(shell echo $$((3 * 4 * 1024 * 1024)))
 .PHONY: 03
-03: $(BUILD)/03_softmax
+03: $(BUILD)/03_softmax/bench
 	$(RUN) $< softmax 03_softmax mem --bytes-per-launch $(SOFTMAX_BYTES)
 
 # ---------------------------------------------------------------------------
 # 04 matmul: compute-bound; GB/s not the right yardstick, we look at TC%.
 # ---------------------------------------------------------------------------
 .PHONY: 04
-04: $(BUILD)/04_matmul
+04: $(BUILD)/04_matmul/bench
 	$(RUN) $< matmul 04_matmul compute
 
 # ---------------------------------------------------------------------------
@@ -54,27 +54,27 @@ SOFTMAX_BYTES ?= $(shell echo $$((3 * 4 * 1024 * 1024)))
 # ---------------------------------------------------------------------------
 LN_BYTES ?= $(shell echo $$((2 * 4 * 1024 * 1024)))
 .PHONY: 05
-05: $(BUILD)/05_layernorm
+05: $(BUILD)/05_layernorm/bench
 	$(RUN) $< layernorm 05_layernorm mem --bytes-per-launch $(LN_BYTES)
 
 .PHONY: 06
-06: $(BUILD)/06_mlp
+06: $(BUILD)/06_mlp/bench
 	$(RUN) $< mlp 06_mlp compute
 
 .PHONY: 07
-07: $(BUILD)/07_attention
+07: $(BUILD)/07_attention/bench
 	$(RUN) $< attention 07_attention compute
 
 .PHONY: 08
-08: $(BUILD)/08_flash_attention_v1
+08: $(BUILD)/08_flash_attention_v1/bench
 	$(RUN) $< flash_attention 08_flash_attention_v1 compute
 
 .PHONY: 09
-09: $(BUILD)/09_flash_attention_v2
+09: $(BUILD)/09_flash_attention_v2/bench
 	$(RUN) $< flash_attention 09_flash_attention_v2 compute
 
 .PHONY: 10
-10: $(BUILD)/10_flash_attention_v3
+10: $(BUILD)/10_flash_attention_v3/bench
 	$(RUN) $< flash_attention 10_flash_attention_v3 compute
 
 # rebuild-on-demand delegating to top-level Makefile
